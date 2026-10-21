@@ -1,4 +1,4 @@
-import { recordLinkDiagnostic } from "../link/diagnostics";
+import { flushLinkDiagnostics, recordLinkDiagnostic } from "../link/diagnostics";
 import { existsSync } from "node:fs";
 import type { Server } from "bun";
 import { siblingRuntimeField, withSiblingMarker } from "../codex/sibling-start";
@@ -165,6 +165,7 @@ export async function recycleStandalone(
     console.warn(`[client] listener stop failed: ${error instanceof Error ? error.message : String(error)}`);
   }
   cleanup();
+  await flushLinkDiagnostics();
   // Recycling back to standalone after `ocx disconnect` must actually bring a standalone
   // proxy back, under every launch shape.
   //
@@ -446,6 +447,7 @@ export async function startClientRuntime(
         console.warn(`[client] listener stop failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
         cleanup();
+        await flushLinkDiagnostics();
         // launchd relaunches only unsuccessful exits; an external signal must still count.
         process.exit(handledSignalExitCode(signal));
       }

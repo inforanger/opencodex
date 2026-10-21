@@ -93,10 +93,10 @@ async function append(dir: string, line: string): Promise<void> {
   }
 }
 
-/** Optional evidence only: finite enum buckets, no timers, no I/O until the first record. */
+/** Optional evidence only: finite enum buckets, no I/O until the first record, timers only while flushing. */
 export function createLinkDiagnosticSink(
   { configDir, now = Date.now }: { configDir?: string; now?: () => number } = {},
-): LinkDiagnosticSink & { flush: () => Promise<void> } {
+): LinkDiagnosticSink & { flush: (timeoutMs?: number) => Promise<void> } {
   // At most 56 buckets; correlation IDs never become keys or retained memory.
   const buckets = new Map<string, { at: number; suppressed: number }>();
   const queue: Array<{ dir: string; line: string }> = [];
@@ -139,10 +139,27 @@ export function createLinkDiagnosticSink(
       startWriter();
     } catch { /* Diagnostics must never change request admission or expose raw errors. */ }
   };
-  return Object.assign(sink, { flush: async () => { while (flight) await flight; } });
+  return Object.assign(sink, { flush: async (timeoutMs = 1_000) => {
+    if (!flight) return;
+    // Keep shutdown bounded even if an asynchronous filesystem or ACL operation stalls.
+    // Timeout leaves the existing writer alone; it may still finish before process exit.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        (async () => { while (flight) await flight; })(),
+        new Promise<void>(resolve => { timer = setTimeout(resolve, Math.min(1_000, Math.max(0, timeoutMs))); }),
+      ]);
+    } catch { /* Best effort; never publish raw errors. */ }
+    finally { clearTimeout(timer); }
+  } });
 }
 
-let defaultSink: LinkDiagnosticSink | undefined;
+let defaultSink: ReturnType<typeof createLinkDiagnosticSink> | undefined;
 export function recordLinkDiagnostic(record: LinkDiagnosticRecord): void {
   try { (defaultSink ??= createLinkDiagnosticSink())(record); } catch { /* Best effort. */ }
+}
+
+/** Drain existing diagnostics for at most one second without activating an unused sink. */
+export async function flushLinkDiagnostics(): Promise<void> {
+  await defaultSink?.flush();
 }

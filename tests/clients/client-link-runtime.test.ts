@@ -8,7 +8,7 @@ import { bindClientListener, scheduleStandaloneRecycle, startClientRuntime } fro
 import type { MachineListenerDeps } from "../../src/client/machine-listener";
 import type { OcxClientConnectionConfig } from "../../src/types";
 import { clientLinkStatePath, writeClientLinkState } from "../../src/client/link-state";
-import { fixturePath } from "../helpers/repo-root";
+import { fixturePath, repoPath } from "../helpers/repo-root";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { watchdogMs } from "../helpers/ci-watchdog";
 
@@ -81,6 +81,45 @@ test("link runtime refuses a busy configured port instead of selecting an epheme
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test.each(["SIGINT", "SIGTERM"])("%s shutdown persists queued diagnostics before process exit", async signal => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-client-signal-diagnostics-"));
+  const source = `
+    import { getDefaultConfig, saveConfig } from ${JSON.stringify(repoPath("src/config.ts"))};
+    import { startClientRuntime } from ${JSON.stringify(repoPath("src/client/runtime.ts"))};
+    import { recordLinkDiagnostic } from ${JSON.stringify(repoPath("src/link/diagnostics.ts"))};
+    const config = getDefaultConfig();
+    config.port = ${freePort()};
+    config.runtimeRole = "client";
+    config.client = ${JSON.stringify(linkClientState())};
+    saveConfig(config);
+    await startClientRuntime({ block: false });
+    recordLinkDiagnostic({ event: "relay_failure", outcome: "auth_failed" });
+    recordLinkDiagnostic({ event: "relay_retry", outcome: "deadline" });
+    recordLinkDiagnostic({ event: "relay_recovered", outcome: "recovered" });
+    process.emit(${JSON.stringify(signal)}, ${JSON.stringify(signal)});
+  `;
+  const child = Bun.spawn([process.execPath, "-e", source], {
+    cwd: root,
+    env: { ...process.env, HOME: root, USERPROFILE: root, CODEX_HOME: join(root, "codex"),
+      OPENCODEX_HOME: join(root, "ocx"), OCX_SERVICE_MANAGED: "0" },
+    stdout: "ignore", stderr: "pipe",
+  });
+  const errors = new Response(child.stderr).text();
+  try {
+    const exit = await waitFor(() => child.exitCode, "signal shutdown");
+    expect({ exit, stderr: await errors }).toEqual({ exit: 0, stderr: "" });
+    const records = readFileSync(join(root, "ocx", "link", "diagnostics.jsonl"), "utf8")
+      .trim().split("\n").map(line => JSON.parse(line));
+    expect(records.map(({ event }) => event)).toEqual(["relay_failure", "relay_retry", "relay_recovered"]);
+    expect(existsSync(join(root, "ocx", "runtime-port.json"))).toBe(false);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await errors;
+    removeTreeWithRetry(root);
   }
 });
 

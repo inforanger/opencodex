@@ -25,7 +25,7 @@ import { inspectIpv4LoopbackListener, type LoopbackOwnerLookupResult } from "../
 import type { LinkDiagnosticSink } from "../link/diagnostics";
 import { isLinkConnection, readClientConnectionState } from "./state";
 import { clientLinkStatePath, readClientLinkState, type ClientLinkState } from "./link-state";
-import type { LinkTunnelGate, LinkOwnerCheck, LinkOwnerCheckContext } from "./link-relay";
+import type { LinkTunnelGate, LinkAdmissionResult } from "./link-relay";
 
 /**
  * The client-owned `ssh -N -L 127.0.0.1:<tunnelPort>:127.0.0.1:<peerListenerPort> <alias>`
@@ -136,7 +136,6 @@ export interface ClientLinkSupervisorDeps extends ClientLinkTunnelDeps, OrphanRe
   /** The link key for the keyed readiness probe. The runtime passes its cached key source. */
   linkKey?: () => string | null;
   /** Async local IPv4 LISTEN ownership; an unknown or foreign owner never receives the link key. */
-  ownsLoopbackListener?: (port: number, pid: number) => Promise<boolean>;
   inspectLoopbackListener?: (port: number, pid: number) => Promise<LoopbackOwnerLookupResult>;
   diagnostic?: LinkDiagnosticSink;
   fetchImpl?: typeof fetch;
@@ -577,11 +576,7 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
   const policy = CLIENT_TUNNEL_RETRY_POLICY;
   const isAlive = deps.isAlive ?? defaultIsAlive;
   const linkKey = deps.linkKey ?? (() => null);
-  const ownerLookup = deps.inspectLoopbackListener ?? (deps.ownsLoopbackListener
-    ? async (port: number, pid: number): Promise<LoopbackOwnerLookupResult> => {
-      const startedAt = performance.now();
-      return { kind: await deps.ownsLoopbackListener!(port, pid) ? "match" : "mismatch", elapsedMs: performance.now() - startedAt };
-    } : inspectIpv4LoopbackListener);
+  const ownerLookup = deps.inspectLoopbackListener ?? inspectIpv4LoopbackListener;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const setSupervisorTimer = deps.setTimer ?? ((callback: () => void, ms: number) => {
     const interval = setInterval(callback, ms);
@@ -628,16 +623,15 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
     if (pid === null || pid === undefined || (adopted !== null && !adoptedRecord)) return null;
     return { pid, generation: ownerGeneration };
   };
-  const listenerOwnedByTunnel = async (port: number, context?: LinkOwnerCheckContext): Promise<boolean> => {
+  const listenerOwnedByTunnel = async (port: number, context?: { requestId?: string }): Promise<LinkAdmissionResult> => {
     const candidate = ownerCandidate(port);
-    if (!candidate) return false;
+    if (!candidate) return { kind: "unavailable" };
     const checkId = randomUUID();
-    const report = (kind: LinkOwnerCheck["kind"], elapsedMs = 0): boolean => {
+    const report = (kind: LinkAdmissionResult["kind"], elapsedMs = 0): LinkAdmissionResult => {
       const check = { kind, elapsedMs, checkId, generation: candidate.generation, state: state.kind };
-      try { context?.onOwnerCheck?.(check); } catch { /* metadata cannot affect ownership */ }
-      try { deps.diagnostic?.({ event: "owner_lookup", outcome: kind, requestId: context?.requestId,
+      if (kind !== "match") try { deps.diagnostic?.({ event: "owner_lookup", outcome: kind, requestId: context?.requestId,
         checkId, generation: candidate.generation, state: state.kind, elapsedMs }); } catch { /* best effort */ }
-      return kind === "match";
+      return check;
     };
     if (adopted !== null) {
       const record = adoptedRecord;
@@ -666,10 +660,18 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
     }
     return report(result.kind, result.elapsedMs);
   };
-  const connected = async (context?: LinkOwnerCheckContext): Promise<boolean> => started && !stopping && failure === undefined
-    && state.kind === "connected" && linkId !== null && tunnelPort !== null
-    && await listenerOwnedByTunnel(tunnelPort, context)
-    && !stopping && failure === undefined && state.kind === "connected";
+  const connected = async (context?: { requestId?: string }): Promise<LinkAdmissionResult> => {
+    if (!started || stopping || failure !== undefined || state.kind !== "connected" || linkId === null || tunnelPort === null) {
+      return { kind: "unavailable" };
+    }
+    const result = await listenerOwnedByTunnel(tunnelPort, context);
+    // State may change during the asynchronous lookup or an optional diagnostic callback.
+    if (result.kind === "match" && (!started || stopping || failure !== undefined
+      || state.kind !== "connected" || result.generation !== ownerGeneration)) {
+      return { ...result, kind: "stale" };
+    }
+    return result;
+  };
 
   const settleWaiters = (): void => {
     if (waiters.size === 0) return;
@@ -820,7 +822,7 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
     probeFlight = flight;
     const wasConnected = state.kind === "connected";
     void (async () => {
-      if (!await listenerOwnedByTunnel(tunnelPort)) return;
+      if ((await listenerOwnedByTunnel(tunnelPort)).kind !== "match") return;
       if (probeFlight !== flight || stopping || flight.abort.signal.aborted
         || child !== flight.child || adopted !== flight.adopted) return;
       const key = linkKey();
@@ -828,7 +830,7 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
       const result = await probeTunnel(fetchImpl, tunnelPort, key, flight.abort.signal);
       // An aborted probe, or one whose listener changed while it ran, proves nothing.
       if (probeFlight !== flight || stopping || child !== flight.child || adopted !== flight.adopted
-        || !await listenerOwnedByTunnel(tunnelPort)) return;
+        || (await listenerOwnedByTunnel(tunnelPort)).kind !== "match") return;
       applyProbe(result, wasConnected);
     })().catch(() => undefined).finally(() => {
       if (probeFlight === flight) probeFlight = undefined;
@@ -991,7 +993,7 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
     pending,
     connected,
     waitForConnected(timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
-      if (state.kind === "connected") return connected();
+      if (state.kind === "connected") return connected().then(result => result.kind === "match");
       if (!pending() || waiters.size >= CLIENT_LINK_MAX_HOLDS || signal?.aborted || !(timeoutMs > 0)) {
         return Promise.resolve(false);
       }

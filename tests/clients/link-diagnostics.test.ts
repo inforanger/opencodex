@@ -196,6 +196,17 @@ test.each([false, true])("slow Windows ACL work yields and bounds the queue (clo
       now = 5_000;
       sink({ event: "owner_lookup", outcome: "match", attempt: 101 });
     }
+    // Shutdown must return even while the ACL runner is still blocked.
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      expect(await Promise.race([
+        sink.flush(10).then(() => "drained"),
+        new Promise<string>(resolve => { watchdog = setTimeout(() => resolve("blocked"), 500); }),
+      ])).toBe("drained");
+      expect(existsSync(path)).toBe(false);
+    } finally {
+      clearTimeout(watchdog);
+    }
     release();
     await sink.flush();
     expect(records(path)).toHaveLength(57); // one active record plus at most 56 queued

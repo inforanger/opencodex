@@ -33,22 +33,17 @@ export interface LinkRelayClock {
  * waits on it only while the tunnel is being (re)established. Every relayed fetch waits for a
  * fresh bounded asynchronous ownership proof, including after a reconnect or refused retry.
  */
-export interface LinkOwnerCheck {
-  kind: "match" | "mismatch" | "lookup_error" | "deadline" | "stale" | "identity_unknown" | "identity_mismatch";
-  elapsedMs: number;
-  generation: number;
-  state: string;
+export interface LinkAdmissionResult {
+  kind: "match" | "mismatch" | "lookup_error" | "deadline" | "stale" | "identity_unknown" | "identity_mismatch" | "unavailable";
+  elapsedMs?: number;
+  generation?: number;
+  state?: string;
   checkId?: string;
 }
 
-export interface LinkOwnerCheckContext {
-  requestId?: string;
-  onOwnerCheck?: (check: LinkOwnerCheck) => void;
-}
-
 export interface LinkTunnelGate {
-  /** True only while a keyed probe has established this live tunnel. */
-  connected(context?: LinkOwnerCheckContext): boolean | Promise<boolean>;
+  /** Admission and its evidence are returned together; only match permits a fetch. */
+  connected(context?: { requestId?: string }): LinkAdmissionResult | Promise<LinkAdmissionResult>;
   /** True while the tunnel is connecting or reconnecting. */
   pending(): boolean;
   /**
@@ -66,7 +61,7 @@ export interface LinkTunnelGate {
  * supervisor, and a relay with no gate at all still refuses every request.
  */
 export const HOME_INITIATED_LINK_TUNNEL: LinkTunnelGate = {
-  connected: () => true,
+  connected: () => ({ kind: "match" }),
   pending: () => false,
   waitForConnected: async () => false,
 };
@@ -369,16 +364,15 @@ export async function relayLinkDataRequest(
   }
 
   const requestId = randomUUID();
-  let lastOwnerCheck: LinkOwnerCheck | undefined;
+  let admission: LinkAdmissionResult = { kind: "unavailable" };
   let recoveryAttempts = 0;
   const diagnostic = (event: LinkDiagnosticRecord["event"], outcome: LinkDiagnosticRecord["outcome"], elapsedMs?: number) => {
     try { deps.diagnostic?.({ event, outcome, requestId,
-      ...(lastOwnerCheck ? { checkId: lastOwnerCheck.checkId, generation: lastOwnerCheck.generation,
-        state: lastOwnerCheck.state, elapsedMs: lastOwnerCheck.elapsedMs } : {}),
+      checkId: admission.checkId, generation: admission.generation,
+      state: admission.state, elapsedMs: admission.elapsedMs,
       ...(elapsedMs !== undefined ? { elapsedMs } : {}), attempt: recoveryAttempts }); }
     catch { /* diagnostics never alter admission */ }
   };
-  const context: LinkOwnerCheckContext = { requestId, onOwnerCheck: check => { lastOwnerCheck = check; } };
   const relayAbort = new AbortController();
   const clock = deps.clock ?? defaultClock;
   let headerTimer: ReturnType<typeof setTimeout> | undefined = clock.setTimeout(() => {
@@ -418,7 +412,7 @@ export async function relayLinkDataRequest(
     return remaining > 0 && await gate.waitForConnected(remaining, relayAbort.signal);
   };
   const tunnelUnavailable = async (
-    reason: LinkDiagnosticRecord["outcome"] = lastOwnerCheck?.kind === "match" ? "unavailable" : lastOwnerCheck?.kind ?? "unavailable",
+    reason: LinkDiagnosticRecord["outcome"] = admission.kind === "match" ? "unavailable" : admission.kind,
     message = "link tunnel unavailable",
     elapsedMs?: number,
   ): Promise<Response> => {
@@ -437,15 +431,15 @@ export async function relayLinkDataRequest(
     return true;
   };
   const checkConnected = async (): Promise<boolean> => {
-    lastOwnerCheck = undefined;
-    return !!tunnel && await tunnel.connected(context);
+    admission = tunnel ? await tunnel.connected({ requestId }) : { kind: "unavailable" };
+    return admission.kind === "match";
   };
   const readyForFetch = async (): Promise<boolean> => {
     if (!tunnel || relayAbort.signal.aborted) return false;
     if (await checkConnected()) return !relayAbort.signal.aborted;
     // No fetch or body read has occurred. A deadline proves neither a foreign owner nor a
     // broken SSH process: give this request one fresh proof, without caching or restarting it.
-    if (lastOwnerCheck?.kind === "deadline" && retryPreflight("deadline")) {
+    if (admission.kind === "deadline" && retryPreflight("deadline")) {
       if (await checkConnected()) return !relayAbort.signal.aborted;
     }
     return !relayAbort.signal.aborted && tunnel.pending() && await holdForTunnel(tunnel)

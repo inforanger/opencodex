@@ -15,7 +15,7 @@ import {
   sanitizeLinkResponseHeaders,
   type LinkRelayClock,
   type LinkTunnelGate,
-  type LinkOwnerCheck,
+  type LinkAdmissionResult,
 } from "../../src/client/link-relay";
 import { LinkRelayAuthenticationError, LinkRelayAuthTimeoutError } from "../../src/client/link-relay-transport";
 import type { LinkDiagnosticRecord } from "../../src/link/diagnostics";
@@ -29,7 +29,7 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const LINK_KEY = `ocx_data_${"d".repeat(40)}`;
 const target = { tunnelPort: 12000, admissionKey: LINK_KEY };
-const connectedTunnel: LinkTunnelGate = { connected: () => true, pending: () => false, waitForConnected: async () => true };
+const connectedTunnel: LinkTunnelGate = { connected: () => ({ kind: "match" }), pending: () => false, waitForConnected: async () => true };
 // Payload and framing cases provide a proven tunnel; admission cases call the implementation directly.
 function relayLinkDataRequest(
   req: Request,
@@ -478,7 +478,7 @@ function manualGate(initiallyPending = true) {
   const state = { pending: initiallyPending, connected: !initiallyPending };
   let open: (connected: boolean) => void = () => {};
   const tunnel: LinkTunnelGate = {
-    connected: () => state.connected,
+    connected: () => ({ kind: state.connected ? "match" : "unavailable" }),
     pending: () => state.pending,
     waitForConnected: timeoutMs => {
       waits.push(timeoutMs);
@@ -501,7 +501,7 @@ describe("client link relay while the tunnel reconnects", () => {
   for (const state of ["missing", "failed", "stopped"] as const) {
     test(`does not send the committed key or fetch while supervision is ${state}`, async () => {
       const forwarded: string[] = [];
-      const unavailable = { pending: () => false, connected: () => false, waitForConnected: async () => false };
+      const unavailable = { pending: () => false, connected: () => ({ kind: "unavailable" as const }), waitForConnected: async () => false };
       const response = await relayLinkDataRequestImpl(relayRequest({ method: "POST", body: "{}" }), target, {
         ...(state === "missing" ? {} : { tunnel: unavailable }),
         fetchImpl: (async (_input, init) => {
@@ -539,7 +539,7 @@ describe("client link relay while the tunnel reconnects", () => {
     let calls = 0;
     const response = await relayLinkDataRequestImpl(new Request("http://127.0.0.1:10100/v1/models"), target, {
       tunnel: {
-        connected: () => connected,
+        connected: () => ({ kind: connected ? "match" : "unavailable" }),
         pending: () => pending,
         waitForConnected: async () => { pending = false; connected = false; return true; },
       },
@@ -601,22 +601,25 @@ describe("client link relay while the tunnel reconnects", () => {
     expect(calls).toBe(0);
   });
 
-  test("a connected tunnel adds no wait", async () => {
+  test("a connected tunnel adds no wait or routine diagnostic", async () => {
     let waited = 0;
-    const tunnel: LinkTunnelGate = { connected: () => true, pending: () => false, waitForConnected: async () => { waited += 1; return true; } };
+    const records: LinkDiagnosticRecord[] = [];
+    const tunnel: LinkTunnelGate = { connected: () => ({ kind: "match" }), pending: () => false, waitForConnected: async () => { waited += 1; return true; } };
     const response = await relayLinkDataRequest(relayRequest({ method: "POST", body: "{}" }), target, {
       tunnel,
+      diagnostic: row => { records.push(row); },
       fetchImpl: (async () => Response.json({ ok: true })) as typeof fetch,
     });
     expect(response.status).toBe(200);
     expect(waited).toBe(0);
+    expect(records).toEqual([]);
   });
 
   test("never replays a request after a reset, even while the tunnel reconnects", async () => {
     let pending = false;
     let calls = 0;
     let waited = 0;
-    const tunnel: LinkTunnelGate = { connected: () => !pending, pending: () => pending, waitForConnected: async () => { waited += 1; return true; } };
+    const tunnel: LinkTunnelGate = { connected: () => ({ kind: pending ? "unavailable" : "match" }), pending: () => pending, waitForConnected: async () => { waited += 1; return true; } };
     const response = await relayLinkDataRequest(relayRequest({ method: "POST", body: '{"input":"once"}' }), target, {
       tunnel,
       fetchImpl: (async (_input, init) => {
@@ -638,7 +641,7 @@ describe("client link relay while the tunnel reconnects", () => {
     let clock = 1_000;
     const waits: number[] = [];
     const tunnel: LinkTunnelGate = {
-      connected: () => !pending,
+      connected: () => ({ kind: pending ? "unavailable" : "match" }),
       pending: () => pending,
       waitForConnected: async timeoutMs => {
         waits.push(timeoutMs);
@@ -673,7 +676,7 @@ describe("client link relay while the tunnel reconnects", () => {
     calls = 0;
     let spentConnected = false;
     const spent = await relayLinkDataRequest(relayRequest({ method: "POST", body: "{}" }), target, {
-      tunnel: { connected: () => spentConnected, pending: () => !spentConnected,
+      tunnel: { connected: () => ({ kind: spentConnected ? "match" : "unavailable" }), pending: () => !spentConnected,
         waitForConnected: async () => { clock += LINK_RELAY_HOLD_MS; spentConnected = true; return true; } },
       now: () => clock,
       fetchImpl: (async () => {
@@ -697,7 +700,7 @@ describe("client link relay while the tunnel reconnects", () => {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ input: "x".repeat(100_000) }),
       }), { tunnelPort: port, admissionKey: LINK_KEY }, {
         tunnel: {
-          connected: () => !pending,
+          connected: () => ({ kind: pending ? "unavailable" : "match" }),
           pending: () => pending,
           waitForConnected: async () => {
             home = Bun.serve({ hostname: "127.0.0.1", port, async fetch(req) { received.push(await req.text()); return Response.json({ ok: true }); } });
@@ -742,11 +745,12 @@ describe("client link relay while the tunnel reconnects", () => {
   });
 });
 
-test("a transient owner deadline retries a fresh proof before forwarding any body", async () => {
+test("a transient owner deadline retries before forwarding even when diagnostics throw", async () => {
   const { gate, checks } = observedGate(["deadline", "match"]);
   let forwarded = 0;
   const response = await relayLinkDataRequestImpl(relayRequest({ method: "POST", body: "untouched" }), target, {
     tunnel: gate,
+    diagnostic: () => { throw new Error("diagnostic sink unavailable"); },
     // This trusted fetch seam records only the final data dispatch.
     fetchImpl: (async (_url, init) => { forwarded += 1; expect(await new Response(init?.body).text()).toBe("untouched"); return Response.json({ ok: true }); }) as typeof fetch,
   });
@@ -756,21 +760,19 @@ test("a transient owner deadline retries a fresh proof before forwarding any bod
 });
 
 
-function observedGate(outcomes: Array<LinkOwnerCheck["kind"] | undefined>, onCheck?: () => void) {
+function observedGate(outcomes: Array<LinkAdmissionResult["kind"]>, onCheck?: () => void) {
   let checks = 0;
   const gate: LinkTunnelGate = {
-    connected(context) {
+    connected() {
       const kind = outcomes[Math.min(checks++, outcomes.length - 1)];
       onCheck?.();
-      if (kind) context?.onOwnerCheck?.({ kind, elapsedMs: kind === "deadline" ? 2000 : 1,
-        generation: 2, state: "connected" });
-      return kind === "match";
+      return { kind, elapsedMs: kind === "deadline" ? 2000 : 1, generation: 2, state: "connected" };
     }, pending: () => false, waitForConnected: async () => false,
   };
   return { gate, checks: () => checks };
 }
 
-test.each(["mismatch", "lookup_error", "stale", "identity_unknown", "identity_mismatch", undefined] as const)(
+test.each(["mismatch", "lookup_error", "stale", "identity_unknown", "identity_mismatch", "unavailable"] as const)(
   "does not retry an owner refusal without a deadline: %s", async kind => {
     const { gate, checks } = observedGate([kind]);
     let forwards = 0;
