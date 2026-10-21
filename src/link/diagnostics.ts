@@ -128,7 +128,7 @@ export function createLinkDiagnosticSink(
         return;
       }
       if (queue.length >= 56) {
-        buckets.set(key, { at: bucket && at >= bucket.at ? bucket.at : at,
+        buckets.set(key, { at: Math.min(bucket?.at ?? at, at),
           suppressed: Math.min(Number.MAX_SAFE_INTEGER, (bucket?.suppressed ?? 0) + 1) });
         return;
       }
@@ -146,4 +146,3 @@ let defaultSink: LinkDiagnosticSink | undefined;
 export function recordLinkDiagnostic(record: LinkDiagnosticRecord): void {
   try { (defaultSink ??= createLinkDiagnosticSink())(record); } catch { /* Best effort. */ }
 }
-export default recordLinkDiagnostic;

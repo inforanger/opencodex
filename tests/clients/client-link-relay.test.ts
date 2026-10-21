@@ -743,21 +743,15 @@ describe("client link relay while the tunnel reconnects", () => {
 });
 
 test("a transient owner deadline retries a fresh proof before forwarding any body", async () => {
-  let checks = 0, forwarded = 0;
-  const tunnel = {
-    connected(context?: { onOwnerCheck?: (result: { kind: string; elapsedMs: number; generation: number; state: string }) => void }) {
-      checks += 1;
-      context?.onOwnerCheck?.({ kind: checks === 1 ? "deadline" : "match", elapsedMs: checks === 1 ? 2000 : 1, generation: 1, state: "connected" });
-      return checks > 1;
-    }, pending: () => false, waitForConnected: async () => false,
-  };
+  const { gate, checks } = observedGate(["deadline", "match"]);
+  let forwarded = 0;
   const response = await relayLinkDataRequestImpl(relayRequest({ method: "POST", body: "untouched" }), target, {
-    tunnel,
+    tunnel: gate,
     // This trusted fetch seam records only the final data dispatch.
     fetchImpl: (async (_url, init) => { forwarded += 1; expect(await new Response(init?.body).text()).toBe("untouched"); return Response.json({ ok: true }); }) as typeof fetch,
   });
   expect(response.status).toBe(200);
-  expect(checks).toBe(2);
+  expect(checks()).toBe(2);
   expect(forwarded).toBe(1);
 });
 
