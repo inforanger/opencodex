@@ -566,6 +566,10 @@ async function probeTunnel(fetchImpl: typeof fetch, tunnelPort: number, key: str
   }
 }
 
+/**
+ * Own the Child's SSH lifecycle and reconnect holds. Each connected() call checks fresh listener
+ * ownership and fences results against tunnel replacement or stop; diagnostics cannot admit it.
+ */
 export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}): ClientLinkSupervisor {
   const sidecarPath = (): string => clientLinkStatePath(deps.configDir);
   const readSidecar = deps.readSidecar ?? readWhenFileChanges(sidecarPath, () => readClientLinkState(sidecarPath()));

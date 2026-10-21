@@ -28,11 +28,7 @@ export interface LinkRelayClock {
   clearTimeout: typeof clearTimeout;
 }
 
-/**
- * The Child's tunnel as the relay sees it (the client link supervisor implements it). A request
- * waits on it only while the tunnel is being (re)established. Every relayed fetch waits for a
- * fresh bounded asynchronous ownership proof, including after a reconnect or refused retry.
- */
+/** A fresh admission verdict plus optional diagnostic evidence; metadata never grants admission. */
 export interface LinkAdmissionResult {
   kind: "match" | "mismatch" | "lookup_error" | "deadline" | "stale" | "identity_unknown" | "identity_mismatch" | "unavailable";
   elapsedMs?: number;
@@ -41,6 +37,11 @@ export interface LinkAdmissionResult {
   checkId?: string;
 }
 
+/**
+ * The Child's tunnel as the relay sees it (the client link supervisor implements it). A request
+ * waits on it only while the tunnel is being (re)established. Every relayed fetch waits for a
+ * fresh bounded asynchronous ownership proof, including after a reconnect or refused retry.
+ */
 export interface LinkTunnelGate {
   /** Admission and its evidence are returned together; only match permits a fetch. */
   connected(context?: { requestId?: string }): LinkAdmissionResult | Promise<LinkAdmissionResult>;
@@ -147,6 +148,7 @@ function relayAuthenticationFailed(error: string): Response {
   });
 }
 
+/** Preserve path/query on a fixed IPv4 loopback origin; throw when the tunnel port is invalid. */
 export function linkRelayDestination(url: URL, target: Pick<LinkRelayTarget, "tunnelPort">): string {
   if (!isLinkPort(target.tunnelPort)) {
     throw new RangeError("invalid link tunnel port");
@@ -191,6 +193,7 @@ function linkRequestHeaders(
   return headers;
 }
 
+/** Drop hop-by-hop and stale length/encoding headers before exposing the decoded response. */
 export function sanitizeLinkResponseHeaders(source: Headers): Headers {
   const connectionNamed = new Set((source.get("connection") ?? "")
     .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
@@ -339,6 +342,11 @@ function idleBoundedStream(
   });
 }
 
+/**
+ * Admit an allowlisted route and stream it through the authenticated tunnel with bounded bodies.
+ * Owner/auth preflight deadlines share one recovery attempt before data dispatch; an ambiguous
+ * post-dispatch failure never earns that recovery. Diagnostic failures cannot change admission.
+ */
 export async function relayLinkDataRequest(
   req: Request,
   target: LinkRelayTarget,

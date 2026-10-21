@@ -29,6 +29,7 @@ const STATES = new Set<TunnelState["kind"]>(["idle", "connecting", "connected", 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_BYTES = 256 * 1024;
 
+/** Copy only bounded enum, UUID and numeric fields; unknown fields never reach disk. */
 function metadata(record: LinkDiagnosticRecord): LinkDiagnosticRecord | null {
   if (!record) return null;
   const { event, outcome, state } = record;
@@ -47,6 +48,7 @@ function metadata(record: LinkDiagnosticRecord): LinkDiagnosticRecord | null {
   return result;
 }
 
+/** Append through a private no-follow handle, keeping at most one 256 KiB rotated backup. */
 async function append(dir: string, line: string): Promise<void> {
   assertNotRealHomeUnderTest(dirname(dir));
   await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -93,7 +95,11 @@ async function append(dir: string, line: string): Promise<void> {
   }
 }
 
-/** Optional evidence only: finite enum buckets, no I/O until the first record, timers only while flushing. */
+/**
+ * Create a best-effort metadata sink with one-second event/outcome buckets and a bounded queue.
+ * File and ACL work starts on the first eligible record and never blocks admission. flush() waits
+ * at most one second; its timeout does not cancel the writer or guarantee durable storage.
+ */
 export function createLinkDiagnosticSink(
   { configDir, now = Date.now }: { configDir?: string; now?: () => number } = {},
 ): LinkDiagnosticSink & { flush: (timeoutMs?: number) => Promise<void> } {
@@ -155,6 +161,7 @@ export function createLinkDiagnosticSink(
 }
 
 let defaultSink: ReturnType<typeof createLinkDiagnosticSink> | undefined;
+/** Lazily enqueue sanitized evidence in the default sink without propagating diagnostic failures. */
 export function recordLinkDiagnostic(record: LinkDiagnosticRecord): void {
   try { (defaultSink ??= createLinkDiagnosticSink())(record); } catch { /* Best effort. */ }
 }

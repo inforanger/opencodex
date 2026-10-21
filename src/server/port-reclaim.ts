@@ -420,7 +420,11 @@ export interface LoopbackOwnerLookupIo {
   run?: (file: string, args: string[], timeoutMs: number) => Promise<string>;
 }
 
-/** Async, bounded proof that this PID owns the IPv4 loopback LISTEN socket used by the relay. */
+/**
+ * Classify fresh IPv4 loopback LISTEN ownership within the bounded lookup deadline.
+ * Only match proves the expected PID; mismatch, inspection failure and timeout remain distinct.
+ * elapsedMs uses a monotonic clock by default, and no raw OS output is returned.
+ */
 export async function inspectIpv4LoopbackListener(
   port: number,
   expectedPid: number,

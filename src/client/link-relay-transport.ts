@@ -161,7 +161,11 @@ async function responseOnConnection(incoming: IncomingMessage, agent: SingleConn
 
 let peerReport: Record<string, string> | undefined;
 
-/** Authenticate and stream one request on the SAME socket; never fall back to an ordinary fetch. */
+/**
+ * Authenticate and stream one request on the SAME socket; never fall back to an ordinary fetch.
+ * LinkRelayAuthTimeoutError certifies that only the credential-free preflight expired before
+ * data-request construction. Caller aborts and failures after that boundary keep their own errors.
+ */
 export async function fetchBoundLinkRelay(
   target: BoundLinkRelayTarget, destination: string, init: RequestInit,
   options: { authTimeoutMs?: number } = {},
