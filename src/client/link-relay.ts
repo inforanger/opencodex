@@ -466,19 +466,19 @@ export async function relayLinkDataRequest(
       };
       upstream = await (deps.fetchImpl ? deps.fetchImpl(destination, init) : fetchBoundLinkRelay(target, destination, init));
     } catch (error) {
-      if (error instanceof LinkRelayAuthTimeoutError) {
-        // The transport certifies that only its credential-free challenge was sent. A new
-        // iteration obtains a fresh ownership proof and a new authenticated physical socket.
-        const elapsedMs = performance.now() - fetchStartedAt;
-        if (retryPreflight("auth_timeout", elapsedMs)) continue;
-        return await tunnelUnavailable("auth_timeout", "link tunnel unavailable", elapsedMs);
-      }
       if (error instanceof LinkRelayAuthenticationError) {
         return await tunnelUnavailable("auth_failed", error.message);
       }
       if (bodyOverflow) {
         cleanup();
         return jsonError(413, "link relay request body too large");
+      }
+      if (error instanceof LinkRelayAuthTimeoutError) {
+        // The transport certifies that only its credential-free challenge was sent. A new
+        // iteration obtains a fresh ownership proof and a new authenticated physical socket.
+        const elapsedMs = performance.now() - fetchStartedAt;
+        if (retryPreflight("auth_timeout", elapsedMs)) continue;
+        return await tunnelUnavailable("auth_timeout", "link tunnel unavailable", elapsedMs);
       }
       // A refused connection sent nothing, and an untouched body can go again once the tunnel
       // is back inside the same hold window. Anything else is never replayed.

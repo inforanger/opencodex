@@ -822,6 +822,24 @@ test("an auth deadline retries fresh admission and delivers the original body on
   ]);
 });
 
+test("an upstream 500 after a preflight retry is not reported as recovered", async () => {
+  const { gate, checks } = observedGate(["match"]);
+  const records: LinkDiagnosticRecord[] = [];
+  let attempts = 0;
+  const response = await relayLinkDataRequestImpl(relayRequest({ method: "POST" }), target, {
+    tunnel: gate, diagnostic: row => records.push(row),
+    fetchImpl: (async () => {
+      if (++attempts === 1) throw new LinkRelayAuthTimeoutError();
+      return new Response("upstream failed", { status: 500 });
+    }) as typeof fetch,
+  });
+  expect(response.status).toBe(500);
+  expect(await response.text()).toBe("upstream failed");
+  expect(checks()).toBe(2);
+  expect(attempts).toBe(2);
+  expect(records.map(row => [row.event, row.outcome])).toEqual([["relay_retry", "auth_timeout"]]);
+});
+
 test.each([false, true])("owner and auth deadlines share a single recovery budget (auth first: %s)", async authFirst => {
   const { gate, checks } = observedGate(authFirst ? ["match", "deadline"] : ["deadline", "match"]);
   let attempts = 0;
@@ -859,6 +877,7 @@ test("caller cancellation during an owner deadline prevents both recovery and di
 
 test("a real five-second silent preflight recovers on a new socket and nonce without replaying data", async () => {
   let challenges = 0, dispatches = 0;
+  const records: LinkDiagnosticRecord[] = [];
   const nonces: string[] = [];
   const ports: number[] = [];
   const sessions = createLinkRelaySessions({ fingerprints: () => [serviceApiTokenFingerprint(LINK_KEY)] });
@@ -881,7 +900,7 @@ test("a real five-second silent preflight recovers on a new socket and nonce wit
   const { gate, checks } = observedGate(["match"]);
   const response = await relayLinkDataRequestImpl(relayRequest({ method: "POST", body: "sent exactly once" }), {
     ...target, tunnelPort: home.port!, linkId: `lnk_${"a".repeat(16)}`, apiKeyId: "ocx_data_fixture",
-  }, { tunnel: gate });
+  }, { tunnel: gate, diagnostic: row => records.push(row) });
   expect(response.status).toBe(200);
   expect(await response.text()).toBe("recovered");
   expect(challenges).toBe(2);
@@ -889,18 +908,30 @@ test("a real five-second silent preflight recovers on a new socket and nonce wit
   expect(new Set(ports).size).toBe(2);
   expect(checks()).toBe(2);
   expect(dispatches).toBe(1);
+  const retry = records.find(row => row.event === "relay_retry" && row.outcome === "auth_timeout");
+  expect(retry?.elapsedMs).toBeGreaterThanOrEqual(4500);
+  expect(retry?.elapsedMs).toBeLessThan(10_000);
 }, 12_000);
 
 
 test("repeated auth deadlines stop after the second preflight without dispatching data", async () => {
   const { gate, checks } = observedGate(["match"]);
+  const records: LinkDiagnosticRecord[] = [];
   let attempts = 0;
   const response = await relayLinkDataRequestImpl(relayRequest({ method: "POST", body: "untouched" }), target, {
-    tunnel: gate, fetchImpl: (async () => { attempts++; throw new LinkRelayAuthTimeoutError(); }) as typeof fetch,
+    tunnel: gate, diagnostic: row => records.push(row), fetchImpl: (async () => {
+      attempts++;
+      await Bun.sleep(20);
+      throw new LinkRelayAuthTimeoutError();
+    }) as typeof fetch,
   });
   expect(response.status).toBe(503);
   expect(checks()).toBe(2);
   expect(attempts).toBe(2);
+  expect(records.map(row => [row.event, row.outcome])).toEqual([
+    ["relay_retry", "auth_timeout"], ["relay_failure", "auth_timeout"],
+  ]);
+  for (const record of records) expect(record.elapsedMs).toBeGreaterThanOrEqual(15);
 });
 
 test("concurrent requests keep their recovery budget and correlation separate", async () => {
@@ -919,4 +950,25 @@ test("concurrent requests keep their recovery budget and correlation separate", 
   }
   expect(first.checks()).toBe(2);
   expect(second.checks()).toBe(2);
+});
+
+
+test("an oversized streamed body remains a 413 when the credential-free auth deadline expires", async () => {
+  const records: LinkDiagnosticRecord[] = [];
+  let attempts = 0;
+  const response = await relayLinkDataRequestImpl(relayRequest({ method: "POST", body: new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(4)); controller.close(); },
+  }) }), target, {
+    tunnel: connectedTunnel, bodyLimitBytes: 3, diagnostic: row => records.push(row),
+    fetchImpl: (async () => {
+      attempts++;
+      // The cap may prefetch while authentication is pending, before data dispatch starts.
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      throw new LinkRelayAuthTimeoutError();
+    }) as typeof fetch,
+  });
+  expect(response.status).toBe(413);
+  expect(await response.json()).toEqual({ error: "link relay request body too large" });
+  expect(attempts).toBe(1);
+  expect(records.some(row => row.event === "relay_retry")).toBe(false);
 });
