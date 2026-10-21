@@ -27,6 +27,14 @@ export class LinkRelayAuthenticationError extends Error {
   }
 }
 
+/** Only the credential-free preflight deadline expired; no data request has begun. */
+export class LinkRelayAuthTimeoutError extends Error {
+  constructor() {
+    super("link relay authentication timed out");
+    this.name = "LinkRelayAuthTimeoutError";
+  }
+}
+
 /** One physical connection, ever. A closed keep-alive socket cannot trigger a silent reconnect. */
 class SingleConnectionAgent extends Agent {
   socket: Socket | undefined;
@@ -154,7 +162,12 @@ async function responseOnConnection(incoming: IncomingMessage, agent: SingleConn
 let peerReport: Record<string, string> | undefined;
 
 /** Authenticate and stream one request on the SAME socket; never fall back to an ordinary fetch. */
-export async function fetchBoundLinkRelay(target: BoundLinkRelayTarget, destination: string, init: RequestInit): Promise<Response> {
+export async function fetchBoundLinkRelay(
+  target: BoundLinkRelayTarget, destination: string, init: RequestInit,
+  options: { authTimeoutMs?: number } = {},
+): Promise<Response> {
+  const authTimeoutMs = options.authTimeoutMs ?? LINK_RELAY_AUTH_TIMEOUT_MS;
+  if (!Number.isFinite(authTimeoutMs) || authTimeoutMs <= 0) throw new RangeError("invalid link relay auth timeout");
   if (!target.linkId || !target.apiKeyId) throw new LinkRelayAuthenticationError();
   const url = new URL(destination);
   if (url.origin !== `http://127.0.0.1:${target.tunnelPort}`) throw new LinkRelayAuthenticationError();
@@ -163,7 +176,8 @@ export async function fetchBoundLinkRelay(target: BoundLinkRelayTarget, destinat
   probe.search = new URLSearchParams({ version: LINK_RELAY_AUTH_VERSION, key: target.apiKeyId,
     link: target.linkId, nonce: challenge.nonce, proof: challenge.caller }).toString();
   const agent = new SingleConnectionAgent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
-  const deadline = clearableDeadline(LINK_RELAY_AUTH_TIMEOUT_MS, init.signal ?? undefined);
+  const deadline = clearableDeadline(authTimeoutMs, init.signal ?? undefined);
+  let dataRequestStarted = false;
   try {
     // The challenge also carries this Child's version and features for the Home's link status.
     peerReport ??= linkPeerReportHeaders(packageVersion("0.0.0"), buildPeerFeatures());
@@ -177,15 +191,20 @@ export async function fetchBoundLinkRelay(target: BoundLinkRelayTarget, destinat
     for await (const chunk of response) {
       if (chunk.length) throw new LinkRelayAuthenticationError();
     }
+    deadline.signal.throwIfAborted();
     deadline.clear();
     init.signal?.throwIfAborted();
     if (!socket || socket.destroyed || socket !== agent.socket) throw new LinkRelayAuthenticationError();
     const headers = new Headers(init.headers);
     headers.set(LINK_RELAY_SESSION_HEADER, challenge.nonce);
+    dataRequestStarted = true;
     const incoming = await requestOnConnection(url, { ...init, headers }, agent, socket);
     return await responseOnConnection(incoming, agent, init.method ?? "GET");
   } catch (error) {
+    const authDeadlineExpired = !dataRequestStarted && deadline.didExpire()
+      && !(error instanceof LinkRelayAuthenticationError);
     await agent.close();
+    if (authDeadlineExpired && !init.signal?.aborted) throw new LinkRelayAuthTimeoutError();
     throw error;
   } finally { deadline.clear(); }
 }

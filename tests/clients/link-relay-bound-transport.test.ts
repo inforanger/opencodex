@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { Agent, request as httpRequest } from "node:http";
+import { Agent, createServer, request as httpRequest, type RequestListener } from "node:http";
 import type { Server } from "bun";
 import { gzipSync } from "node:zlib";
-import { fetchBoundLinkRelay, LinkRelayAuthenticationError } from "../../src/client/link-relay-transport";
+import { fetchBoundLinkRelay, LinkRelayAuthenticationError, LinkRelayAuthTimeoutError } from "../../src/client/link-relay-transport";
 import { relayLinkDataRequest, HOME_INITIATED_LINK_TUNNEL } from "../../src/client/link-relay";
 import { createLinkRelaySessions } from "../../src/server/index/link-relay-sessions";
 import { createLinkListenerLifecycle } from "../../src/server/index/link-listener";
@@ -41,6 +41,19 @@ async function rawGet(url: URL, agent: Agent, headers?: Record<string, string>) 
     });
     req.on("error", reject); req.end();
   });
+}
+
+async function withHttpPeer(handler: RequestListener, run: (port: number) => Promise<void>) {
+  const server = createServer(handler);
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing peer port");
+    await run(address.port);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 }
 
 describe("connection-bound link relay", () => {
@@ -108,14 +121,91 @@ describe("connection-bound link relay", () => {
 
   test("an unrecognized or invalid peer gets no credentials or body, and missing identity refuses locally", async () => {
     const requests: Request[] = [];
-    const home = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: req => { requests.push(req); return new Response(null, { status: 404 }); } });
+    const home = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: req => {
+      requests.push(req);
+      return new Response(null, requests.length === 1 ? { status: 404 }
+        : { status: 204, headers: { "x-opencodex-link-proof": "0".repeat(64) } });
+    } });
     try {
       await expect(fetchBoundLinkRelay(target(home.port!), `${home.url}v1/models`, {})).rejects.toBeInstanceOf(LinkRelayAuthenticationError);
       expect(requests).toHaveLength(1); expect(requests[0]!.headers.has("authorization")).toBe(false);
       expect(requests[0]!.method).toBe("GET"); expect(requests[0]!.body).toBeNull();
+      await expect(fetchBoundLinkRelay(target(home.port!), `${home.url}v1/models`, {})).rejects.toBeInstanceOf(LinkRelayAuthenticationError);
+      expect(requests).toHaveLength(2);
+      expect(requests[1]!.headers.has("authorization")).toBe(false); expect(requests[1]!.body).toBeNull();
       await expect(fetchBoundLinkRelay({ tunnelPort: home.port!, admissionKey: key }, `${home.url}v1/models`, {})).rejects.toThrow();
-      expect(requests).toHaveLength(1);
+      expect(requests).toHaveLength(2);
     } finally { await home.stop(true); }
+  });
+
+  test("a silent actual peer expires only the credential-free auth deadline without touching the body", async () => {
+    const seen: Array<{ url: string; authorization: string | undefined; body: string }> = [];
+    let bodyRead = false, bodyCancelled = false;
+    const body = new ReadableStream({
+      pull() { bodyRead = true; }, cancel() { bodyCancelled = true; },
+    }, { highWaterMark: 0 });
+    await withHttpPeer(req => {
+      const record = { url: req.url!, authorization: req.headers.authorization, body: "" };
+      seen.push(record);
+      req.on("data", chunk => { record.body += chunk.toString(); });
+    }, async port => {
+      await expect(fetchBoundLinkRelay(target(port), `http://127.0.0.1:${port}/v1/responses`, {
+        method: "POST", headers: { authorization: `Bearer ${key}` }, body,
+      }, { authTimeoutMs: 20 })).rejects.toBeInstanceOf(LinkRelayAuthTimeoutError);
+      expect(seen).toHaveLength(1);
+      expect(new URL(seen[0]!.url, "http://peer").pathname).toBe(LINK_RELAY_AUTH_PATH);
+      expect(seen[0]!.authorization).toBeUndefined(); expect(seen[0]!.body).toBe("");
+      expect(bodyRead).toBe(false); expect(bodyCancelled).toBe(false); expect(body.locked).toBe(false);
+    });
+  });
+
+  test("parent abort during a real auth probe is not an auth deadline", async () => {
+    const parent = new AbortController();
+    let probes = 0;
+    await withHttpPeer(() => { probes++; parent.abort(new DOMException("caller stopped", "AbortError")); }, async port => {
+      const error = await fetchBoundLinkRelay(target(port), `http://127.0.0.1:${port}/v1/models`, {
+        signal: parent.signal,
+      }, { authTimeoutMs: 40 }).catch(error => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(LinkRelayAuthTimeoutError);
+      expect(probes).toBe(1);
+    });
+  });
+
+  for (const failure of ["header timeout", "reset"] as const) {
+    test(`post-proof data ${failure} is never a preflight auth timeout`, async () => {
+      const parent = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let probes = 0, dataRequests = 0;
+      await withHttpPeer((req, res) => {
+        const url = new URL(req.url!, "http://peer");
+        if (url.pathname === LINK_RELAY_AUTH_PATH) {
+          probes++;
+          res.writeHead(204, { "x-opencodex-link-proof": linkRelayProof(fp, "listener", keyId, linkId,
+            url.searchParams.get("nonce")!)! });
+          res.end(); return;
+        }
+        dataRequests++;
+        if (failure === "reset") req.socket.destroy();
+        else timer = setTimeout(() => parent.abort(new DOMException("data headers timed out", "TimeoutError")), 40);
+      }, async port => {
+        try {
+          const error = await fetchBoundLinkRelay(target(port), `http://127.0.0.1:${port}/v1/models`, {
+            headers: { authorization: `Bearer ${key}` }, signal: parent.signal,
+          }, { authTimeoutMs: 20 }).catch(error => error);
+          expect(error).toBeInstanceOf(Error);
+          expect(error).not.toBeInstanceOf(LinkRelayAuthTimeoutError);
+          expect(probes).toBe(1); expect(dataRequests).toBe(1);
+        } finally { clearTimeout(timer); parent.abort(); }
+      });
+    });
+  }
+
+  test("auth deadline overrides must be finite and positive", async () => {
+    for (const authTimeoutMs of [0, -1, NaN, Infinity]) {
+      await expect(fetchBoundLinkRelay(target(1), "http://127.0.0.1:1/v1/models", {}, { authTimeoutMs }))
+        .rejects.toBeInstanceOf(RangeError);
+    }
   });
 
   test("a removed last link cannot release its port while an authenticated response is still streaming", async () => {

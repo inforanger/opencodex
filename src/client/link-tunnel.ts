@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { readFile as readFileAsync } from "node:fs/promises";
@@ -20,10 +21,11 @@ import {
   type TunnelState,
 } from "../link/tunnel-state";
 import { isLinkPort } from "../link/ports";
-import { ownsIpv4LoopbackListener } from "../server/port-reclaim";
+import { inspectIpv4LoopbackListener, type LoopbackOwnerLookupResult } from "../server/port-reclaim";
+import type { LinkDiagnosticSink } from "../link/diagnostics";
 import { isLinkConnection, readClientConnectionState } from "./state";
 import { clientLinkStatePath, readClientLinkState, type ClientLinkState } from "./link-state";
-import type { LinkTunnelGate } from "./link-relay";
+import type { LinkTunnelGate, LinkOwnerCheck, LinkOwnerCheckContext } from "./link-relay";
 
 /**
  * The client-owned `ssh -N -L 127.0.0.1:<tunnelPort>:127.0.0.1:<peerListenerPort> <alias>`
@@ -135,6 +137,8 @@ export interface ClientLinkSupervisorDeps extends ClientLinkTunnelDeps, OrphanRe
   linkKey?: () => string | null;
   /** Async local IPv4 LISTEN ownership; an unknown or foreign owner never receives the link key. */
   ownsLoopbackListener?: (port: number, pid: number) => Promise<boolean>;
+  inspectLoopbackListener?: (port: number, pid: number) => Promise<LoopbackOwnerLookupResult>;
+  diagnostic?: LinkDiagnosticSink;
   fetchImpl?: typeof fetch;
   now?: () => number;
   random?: () => number;
@@ -573,7 +577,11 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
   const policy = CLIENT_TUNNEL_RETRY_POLICY;
   const isAlive = deps.isAlive ?? defaultIsAlive;
   const linkKey = deps.linkKey ?? (() => null);
-  const ownerLookup = deps.ownsLoopbackListener ?? ownsIpv4LoopbackListener;
+  const ownerLookup = deps.inspectLoopbackListener ?? (deps.ownsLoopbackListener
+    ? async (port: number, pid: number): Promise<LoopbackOwnerLookupResult> => {
+      const startedAt = performance.now();
+      return { kind: await deps.ownsLoopbackListener!(port, pid) ? "match" : "mismatch", elapsedMs: performance.now() - startedAt };
+    } : inspectIpv4LoopbackListener);
   const fetchImpl = deps.fetchImpl ?? fetch;
   const setSupervisorTimer = deps.setTimer ?? ((callback: () => void, ms: number) => {
     const interval = setInterval(callback, ms);
@@ -620,9 +628,17 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
     if (pid === null || pid === undefined || (adopted !== null && !adoptedRecord)) return null;
     return { pid, generation: ownerGeneration };
   };
-  const listenerOwnedByTunnel = async (port: number): Promise<boolean> => {
+  const listenerOwnedByTunnel = async (port: number, context?: LinkOwnerCheckContext): Promise<boolean> => {
     const candidate = ownerCandidate(port);
     if (!candidate) return false;
+    const checkId = randomUUID();
+    const report = (kind: LinkOwnerCheck["kind"], elapsedMs = 0): boolean => {
+      const check = { kind, elapsedMs, checkId, generation: candidate.generation, state: state.kind };
+      try { context?.onOwnerCheck?.(check); } catch { /* metadata cannot affect ownership */ }
+      try { deps.diagnostic?.({ event: "owner_lookup", outcome: kind, requestId: context?.requestId,
+        checkId, generation: candidate.generation, state: state.kind, elapsedMs }); } catch { /* best effort */ }
+      return kind === "match";
+    };
     if (adopted !== null) {
       const record = adoptedRecord;
       const identity = record ? await inspectAdoptedIdentity(record, deps) : "unknown";
@@ -640,16 +656,20 @@ export function createClientLinkSupervisor(deps: ClientLinkSupervisorDeps = {}):
           invalidateOwnerProof();
           setState(IDLE);
         }
-        return false;
+        return report(identity === "mismatch" ? "identity_mismatch" : "identity_unknown");
       }
     }
-    const owned = await Promise.resolve().then(() => ownerLookup(port, candidate.pid)).catch(() => false);
-    return owned && !stopping && ownerGeneration === candidate.generation
-      && ownerCandidate(port)?.pid === candidate.pid;
+    const result = await Promise.resolve().then(() => ownerLookup(port, candidate.pid))
+      .catch((): LoopbackOwnerLookupResult => ({ kind: "lookup_error", elapsedMs: 0 }));
+    if (stopping || failure !== undefined || ownerGeneration !== candidate.generation || ownerCandidate(port)?.pid !== candidate.pid) {
+      return report("stale", result.elapsedMs);
+    }
+    return report(result.kind, result.elapsedMs);
   };
-  const connected = async (): Promise<boolean> => started && !stopping && failure === undefined
+  const connected = async (context?: LinkOwnerCheckContext): Promise<boolean> => started && !stopping && failure === undefined
     && state.kind === "connected" && linkId !== null && tunnelPort !== null
-    && await listenerOwnedByTunnel(tunnelPort);
+    && await listenerOwnedByTunnel(tunnelPort, context)
+    && !stopping && failure === undefined && state.kind === "connected";
 
   const settleWaiters = (): void => {
     if (waiters.size === 0) return;

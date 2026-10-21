@@ -1,3 +1,4 @@
+import { recordLinkDiagnostic } from "../link/diagnostics";
 import type { Server } from "bun";
 import { loadConfig } from "../config";
 import { browserSecurityHeaders, requestPolicyView } from "../server/auth-cors";
@@ -152,7 +153,7 @@ export function startMachineListener(
       apiKeyId: connection.apiKeyId,
       policy: requestPolicyView(config, "127.0.0.1"),
       linkKey: deps.linkKeySource ?? createLinkKeySource(connection.tokenFingerprint, deps.linkKey),
-      relay: { fetchImpl: deps.fetchImpl, bodyLimitBytes: inboundBodyLimit, tunnel: deps.linkTunnel, ...deps.linkRelay },
+      relay: { diagnostic: recordLinkDiagnostic, fetchImpl: deps.fetchImpl, bodyLimitBytes: inboundBodyLimit, tunnel: deps.linkTunnel, ...deps.linkRelay },
     }
     : null;
   return (deps.serve ?? (options => Bun.serve(options)))({

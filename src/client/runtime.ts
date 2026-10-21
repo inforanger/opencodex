@@ -1,3 +1,4 @@
+import { recordLinkDiagnostic } from "../link/diagnostics";
 import { existsSync } from "node:fs";
 import type { Server } from "bun";
 import { siblingRuntimeField, withSiblingMarker } from "../codex/sibling-start";
@@ -318,6 +319,7 @@ export async function startClientRuntime(
   const serve = async (rollback?: { port: number; portWaitMs: number }): Promise<boolean> => {
     const supervisor = supervised
       ? createClientLinkSupervisor({
+        diagnostic: recordLinkDiagnostic,
         onLinkEnded: () => scheduleStandaloneRecycle(state.value.tokenFingerprint),
         linkKey,
       })

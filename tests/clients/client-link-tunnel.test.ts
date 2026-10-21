@@ -1124,3 +1124,153 @@ test("the supervisor's own reads parse a file again only after it changed", () =
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+for (const kind of ["match", "mismatch", "deadline"] as const) {
+  test(`fresh ${kind} owner proof reports correlated timing and admits only a match`, async () => {
+    let result: Awaited<ReturnType<NonNullable<ClientLinkSupervisorDeps["inspectLoopbackListener"]>>> = { kind: "match", elapsedMs: 1 };
+    const checks: import("../../src/client/link-relay").LinkOwnerCheck[] = [];
+    const events: import("../../src/link/diagnostics").LinkDiagnosticRecord[] = [];
+    const h = supervisorHarness({ inspectLoopbackListener: async () => result, diagnostic: event => { events.push(event); } });
+    try {
+      await h.start();
+      await h.step();
+      expect(h.state()).toBe("connected");
+      events.length = 0;
+      result = { kind, elapsedMs: 2_003.25 };
+      for (let request = 0; request < 2; request += 1) {
+        expect(await h.supervisor.connected({ requestId: `request-${request}`, onOwnerCheck: check => { checks.push(check); } }))
+          .toBe(kind === "match");
+      }
+      expect(checks).toHaveLength(2);
+      expect(events).toHaveLength(2);
+      for (const [index, check] of checks.entries()) {
+        expect(check).toMatchObject({ kind, elapsedMs: 2_003.25, state: "connected" });
+        expect(check.checkId).toEqual(expect.any(String));
+        expect(check.checkId!.length).toBeGreaterThan(0);
+        expect(Number.isSafeInteger(check.generation)).toBe(true);
+        expect(check.generation).toBeGreaterThan(0);
+        expect(events[index]).toEqual({ event: "owner_lookup", outcome: kind, requestId: `request-${index}`,
+          checkId: check.checkId, generation: check.generation, state: "connected", elapsedMs: 2_003.25 });
+      }
+      expect(checks[1]!.checkId).not.toBe(checks[0]!.checkId);
+      expect(checks[1]!.generation).toBe(checks[0]!.generation);
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+for (const transition of ["stop", "replacement", "sidecar failure"] as const) {
+  for (const kind of ["match", "deadline"] as const) {
+    test(`a delayed ${kind} after ${transition} is stale and cannot admit or report a deadline`, async () => {
+      type OwnerResult = Awaited<ReturnType<NonNullable<ClientLinkSupervisorDeps["inspectLoopbackListener"]>>>;
+      const delayed = deferred<OwnerResult>();
+      const entered = deferred<void>();
+      let delayNext = false;
+      const checks: import("../../src/client/link-relay").LinkOwnerCheck[] = [];
+      const events: import("../../src/link/diagnostics").LinkDiagnosticRecord[] = [];
+      const h = supervisorHarness({
+        inspectLoopbackListener: async () => {
+          if (delayNext) {
+            delayNext = false;
+            entered.resolve();
+            return delayed.promise;
+          }
+          return { kind: "match", elapsedMs: 1 };
+        },
+        diagnostic: event => { events.push(event); },
+      });
+      try {
+        await h.start();
+        await h.step();
+        expect(h.state()).toBe("connected");
+        const baseline: import("../../src/client/link-relay").LinkOwnerCheck[] = [];
+        expect(await h.supervisor.connected({ onOwnerCheck: check => { baseline.push(check); } })).toBe(true);
+        events.length = 0;
+        delayNext = true;
+        const admission = h.supervisor.connected({ requestId: "delayed-request", onOwnerCheck: check => { checks.push(check); } });
+        await entered.promise;
+        if (transition === "stop") {
+          await h.supervisor.stop();
+          expect(h.state()).toBe("idle");
+        } else if (transition === "sidecar failure") {
+          h.view.sidecar = "unreadable";
+          await h.step();
+          await h.step();
+          expect(h.state()).toBe("connected");
+          await h.step();
+          expect(h.supervisor.status()).toEqual({ kind: "failed", reason: "sidecar_invalid" });
+        } else {
+          h.ssh.children[0]!.exit(255, "Connection reset by peer");
+          await h.settle();
+          for (let tick = 0; tick < 10 && h.ssh.children.length < 2; tick += 1) await h.step();
+          expect(h.ssh.children).toHaveLength(2);
+          await h.step();
+          expect(h.state()).toBe("connected");
+        }
+        delayed.resolve({ kind, elapsedMs: 2_004.5 });
+        expect(await admission).toBe(false);
+        expect(checks).toHaveLength(1);
+        expect(checks[0]).toMatchObject({ kind: "stale", elapsedMs: 2_004.5,
+          generation: baseline[0]!.generation, state: transition === "replacement" ? "connected" : "idle" });
+        expect(checks[0]!.checkId).not.toBe(baseline[0]!.checkId);
+        expect(events.filter(event => event.requestId === "delayed-request")).toEqual([
+          { event: "owner_lookup", outcome: "stale", requestId: "delayed-request", checkId: checks[0]!.checkId,
+            generation: baseline[0]!.generation, state: transition === "replacement" ? "connected" : "idle", elapsedMs: 2_004.5 },
+        ]);
+        if (transition === "replacement") {
+          const fresh: import("../../src/client/link-relay").LinkOwnerCheck[] = [];
+          expect(await h.supervisor.connected({ onOwnerCheck: check => { fresh.push(check); } })).toBe(true);
+          expect(fresh[0]!.generation).toBeGreaterThan(checks[0]!.generation);
+        }
+      } finally {
+        delayed.resolve({ kind: "match", elapsedMs: 1 });
+        await h.close();
+      }
+    });
+  }
+}
+
+for (const kind of ["match", "mismatch", "deadline"] as const) {
+  test(`throwing owner callbacks and diagnostic sinks preserve ${kind} admission`, async () => {
+    let result: "match" | "mismatch" | "deadline" = "match";
+    let callbacks = 0;
+    let diagnostics = 0;
+    const h = supervisorHarness({
+      inspectLoopbackListener: async () => ({ kind: result, elapsedMs: 7 }),
+      diagnostic: () => { diagnostics += 1; throw new Error("diagnostic sink unavailable"); },
+    });
+    try {
+      await h.start();
+      await h.step();
+      expect(h.state()).toBe("connected");
+      diagnostics = 0;
+      result = kind;
+      expect(await h.supervisor.connected({ requestId: "throwing-sinks", onOwnerCheck: () => {
+        callbacks += 1;
+        throw new Error("owner callback unavailable");
+      } })).toBe(kind === "match");
+      expect(callbacks).toBe(1);
+      expect(diagnostics).toBe(1);
+      expect(h.state()).toBe("connected");
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+test("a stop triggered by owner diagnostics is rechecked before final admission", async () => {
+  const h = supervisorHarness({ inspectLoopbackListener: async () => ({ kind: "match", elapsedMs: 1 }) });
+  let stopping: Promise<void> | undefined;
+  try {
+    await h.start();
+    await h.step();
+    expect(h.state()).toBe("connected");
+    expect(await h.supervisor.connected({ onOwnerCheck: () => { stopping = h.supervisor.stop(); } })).toBe(false);
+    await stopping;
+    expect(h.state()).toBe("idle");
+  } finally {
+    await stopping;
+    await h.close();
+  }
+});
