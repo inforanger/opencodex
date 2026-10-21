@@ -122,12 +122,14 @@ export function createLinkDiagnosticSink(
       if (!Number.isSafeInteger(at) || at < 0) return;
       const key = `${safe.event}:${safe.outcome}`;
       const bucket = buckets.get(key);
-      if (bucket && at - bucket.at < 1_000) {
+      // Wall-clock rollback starts a new window, even when the writer is backed up.
+      if (bucket && at >= bucket.at && at - bucket.at < 1_000) {
         bucket.suppressed = Math.min(Number.MAX_SAFE_INTEGER, bucket.suppressed + 1);
         return;
       }
       if (queue.length >= 56) {
-        buckets.set(key, { at: bucket?.at ?? at, suppressed: Math.min(Number.MAX_SAFE_INTEGER, (bucket?.suppressed ?? 0) + 1) });
+        buckets.set(key, { at: bucket && at >= bucket.at ? bucket.at : at,
+          suppressed: Math.min(Number.MAX_SAFE_INTEGER, (bucket?.suppressed ?? 0) + 1) });
         return;
       }
       const suppressed = bucket?.suppressed ?? 0;

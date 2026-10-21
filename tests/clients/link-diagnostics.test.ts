@@ -72,6 +72,28 @@ test("deduplicates across changing IDs and reports suppression on the next eligi
   expect(written[4]).toEqual({ event: "owner_lookup", outcome: "match", timestamp: 2_000 });
 });
 
+test("a backward clock step starts a new diagnostic window and preserves suppression counts", async () => {
+  const { configDir, path } = fixture();
+  let now = 10_000;
+  const sink = createLinkDiagnosticSink({ configDir, now: () => now });
+  const record: LinkDiagnosticRecord = { event: "relay_failure", outcome: "auth_timeout" };
+  sink(record);
+  now = 10_500;
+  sink(record);
+  now = 5_000;
+  sink(record);
+  now = 5_500;
+  sink(record);
+  now = 6_000;
+  sink(record);
+  await sink.flush();
+  expect(records(path)).toEqual([
+    { ...record, timestamp: 10_000 },
+    { ...record, timestamp: 5_000, suppressed: 1 },
+    { ...record, timestamp: 6_000, suppressed: 1 },
+  ]);
+});
+
 test("keeps private modes and rotates at 256 KiB with only one bounded backup", async () => {
   const { configDir, dir, path } = fixture();
   let now = 0;
@@ -143,7 +165,7 @@ test.skipIf(process.platform === "win32")("refuses symlink logs without modifyin
 });
 
 
-test("slow Windows ACL work yields to request timers and keeps its pending queue bounded", async () => {
+test.each([false, true])("slow Windows ACL work yields and bounds the queue (clock rolls back: %s)", async rollback => {
   const { configDir, path } = fixture();
   let enter!: () => void, release!: () => void;
   const entered = new Promise<void>(resolve => { enter = resolve; });
@@ -170,13 +192,24 @@ test("slow Windows ACL work yields to request timers and keeps its pending queue
     await new Promise<void>(resolve => setTimeout(resolve, 0));
     expect(existsSync(path)).toBe(false);
     expect(syncCalls).toBe(0);
+    if (rollback) {
+      now = 5_000;
+      sink({ event: "owner_lookup", outcome: "match", attempt: 101 });
+    }
     release();
     await sink.flush();
     expect(records(path)).toHaveLength(57); // one active record plus at most 56 queued
-    now += 1_000;
-    sink({ event: "owner_lookup", outcome: "match", attempt: 101 });
+    if (rollback) {
+      now += 500;
+      sink({ event: "owner_lookup", outcome: "match", attempt: 102 });
+      await sink.flush();
+      expect(records(path)).toHaveLength(57);
+    }
+    now += rollback ? 500 : 1_000;
+    const attempt = rollback ? 103 : 101;
+    sink({ event: "owner_lookup", outcome: "match", attempt });
     await sink.flush();
-    expect(records(path).at(-1)).toMatchObject({ attempt: 101, suppressed: 44 });
+    expect(records(path).at(-1)).toMatchObject({ attempt, timestamp: now, suppressed: rollback ? 46 : 44 });
   } finally {
     release();
     await sink.flush();
