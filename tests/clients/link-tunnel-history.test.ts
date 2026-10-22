@@ -7,6 +7,7 @@ import { createLinkDiagnosticSink, type LinkDiagnosticRecord } from "../../src/l
 import { attachLinkTunnelDiagnostics, projectLinkStatus } from "../../src/link/status-projection";
 import type { LinkStore } from "../../src/link/store";
 import { createLinkSupervisor, type LinkSupervisor } from "../../src/link/supervisor";
+import { TUNNEL_CAUSES } from "../../src/link/tunnel-history";
 import type { SshChild, SshRunner } from "../../src/link/ssh-runner";
 import { handleManagementAPI } from "../../src/server/management-api";
 import type { ManagementApiDeps } from "../../src/server/management/context";
@@ -179,13 +180,17 @@ test("the diagnostics file keeps only the fixed tunnel fields", async () => {
   } as LinkDiagnosticRecord);
   sink({ event: "tunnel_transition", outcome: "connected", state: "connected", previousState: "bogus", tunnelPort: 70_000 } as LinkDiagnosticRecord);
   sink({ event: "tunnel_transition", outcome: "not-a-cause" } as unknown as LinkDiagnosticRecord);
+  // Every cause the history can name is an allowed outcome; none is dropped as unknown.
+  for (const cause of TUNNEL_CAUSES) sink({ event: "tunnel_transition", outcome: cause, state: "failed" });
   await sink.flush();
   const lines = readFileSync(join(configDir, "link", "diagnostics.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
-  expect(lines).toEqual([
+  expect(lines.slice(0, 2)).toEqual([
     { event: "tunnel_transition", outcome: "remote_forward_conflict", state: "failed", previousState: "reconnecting",
       attempt: 3, retryAfterMs: 120_000, tunnelPort: 19002, timestamp: 1_000 },
     { event: "tunnel_transition", outcome: "connected", state: "connected", timestamp: 1_000 },
   ]);
+  // remote_forward_conflict was already written once in this one-second window.
+  expect(lines.slice(2).map(line => line.outcome)).toEqual(TUNNEL_CAUSES.filter(cause => cause !== "remote_forward_conflict"));
 });
 
 function statusDeps(supervisor: LinkSupervisor, store: LinkStore): ManagementApiDeps {
