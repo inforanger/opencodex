@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
-import { hardenSecretDirAsync, hardenSecretPathAsync, windowsSecretAclApplies } from "../lib/windows-secret-acl";
+import { hardenSecretDirAsync, hardenSecretPathAsync, reattributeHardenedSecretPath, windowsSecretAclApplies } from "../lib/windows-secret-acl";
 import { linkDir } from "./paths";
 import type { TunnelState } from "./tunnel-state";
 
@@ -90,6 +90,16 @@ async function append(dir: string, line: string): Promise<void> {
       else await file.chmod(0o600);
     }
     await file.write(line);
+    if (windows) {
+      const written = await file.stat({ bigint: true });
+      const named = await lstat(path, { bigint: true });
+      if (!named.isSymbolicLink() && named.dev === written.dev && named.ino === written.ino) {
+        // Windows publishes content-write ChangeTime on close; retain only the same object's ACL memo.
+        await file.close();
+        file = undefined;
+        reattributeHardenedSecretPath(path);
+      }
+    }
   } finally {
     await file?.close();
   }

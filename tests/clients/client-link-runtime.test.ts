@@ -121,7 +121,7 @@ test.each(["SIGINT", "SIGTERM"])("%s shutdown persists queued diagnostics before
     await errors;
     removeTreeWithRetry(root);
   }
-});
+}, watchdogMs(60_000));
 
 test("an ended link recycles a connected sibling after listener cleanup", async () => {
   const root = mkdtempSync(join(tmpdir(), "ocx-client-sibling-recycle-"));

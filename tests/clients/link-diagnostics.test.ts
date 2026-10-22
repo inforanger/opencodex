@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLinkDiagnosticSink, type LinkDiagnosticRecord } from "../../src/link/diagnostics";
@@ -164,6 +164,54 @@ test.skipIf(process.platform === "win32")("refuses symlink logs without modifyin
   expect(readFileSync(target, "utf8")).toBe("preserve");
 });
 
+
+test("Windows diagnostic appends reuse ACLs only until the file or its permissions change", async () => {
+  const { configDir, path } = fixture();
+  let now = 0, grants = 0;
+  setPlatformForTests("win32");
+  resetHardenedStateForTests();
+  setAsyncWindowsPrincipalRunnerForTests(async () => ({ success: true, exitCode: 0, timedOut: false,
+    stdout: "S-1-5-21-1-2-3-1001\nTEST\\user\n" }));
+  setAsyncIcaclsRunnerForTests(async args => {
+    if (args[0] === path && args.includes("/grant:r")) grants++;
+    return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+  });
+  const sink = createLinkDiagnosticSink({ configDir, now: () => now });
+  const append = async () => {
+    sink({ event: "relay_failure", outcome: "auth_timeout" });
+    await sink.flush();
+    now += 1_000;
+  };
+  try {
+    await append();
+    expect(grants).toBe(1);
+    await append();
+    expect(records(path)).toHaveLength(2);
+    expect(grants).toBe(1);
+
+    // Keep the old object alive so replacing the path cannot recycle its inode.
+    renameSync(path, `${path}.old`);
+    writeFileSync(path, "");
+    await append();
+    expect(records(path)).toHaveLength(1);
+    expect(grants).toBe(2);
+    await append();
+    expect(grants).toBe(2);
+
+    chmodSync(path, 0o400);
+    chmodSync(path, 0o600);
+    await append();
+    expect(records(path)).toHaveLength(3);
+    expect(grants).toBe(3);
+  } finally {
+    await sink.flush();
+    setAsyncIcaclsRunnerForTests(null);
+    setPlatformForTests(null);
+    setAsyncWindowsPrincipalRunnerForTests(null);
+    resetWindowsPrincipalForTests();
+    resetHardenedStateForTests();
+  }
+});
 
 test.each([false, true])("slow Windows ACL work yields and bounds the queue (clock rolls back: %s)", async rollback => {
   const { configDir, path } = fixture();
