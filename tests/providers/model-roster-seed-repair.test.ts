@@ -107,21 +107,22 @@ describe("MiniMax preview catalog retention", () => {
 });
 
 describe.each([
-  { provider: "alibaba-token-plan", before: [
+  // Beijing is pinned to its registry host by the router, so any saved URL is refreshed.
+  { provider: "alibaba-token-plan", baseUrl: "https://example.com/v1", before: [
   "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash",
   "deepseek-v4-pro", "deepseek-v4-flash-0731", "deepseek-v4.1-flash", "glm-5.2", "glm-5.3",
 ] },
-  { provider: "alibaba-token-plan-intl", before: [
+  { provider: "alibaba-token-plan-intl", baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", before: [
   "qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.6-flash",
   "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-flash", "deepseek-v4-flash-0731", "deepseek-v4.1-flash", "deepseek-v3.2",
   "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5",
   "glm-5.2", "glm-5.3", "glm-5.1", "glm-5",
   "MiniMax-M2.5",
 ] },
-])("Token Plan saved roster refresh: $provider", ({ provider, before }) => {
+])("Token Plan saved roster refresh: $provider", ({ provider, baseUrl, before }) => {
   const entry = STALE_MODEL_ROSTERS.find(row => row.provider === provider)!;
   const makeConfig = (models: string[]) => ({ providers: { [entry.provider]: {
-    adapter: "openai-chat", baseUrl: "https://example.com/v1", models,
+    adapter: "openai-chat", baseUrl, models,
     defaultModel: "qwen3.8-max", liveModels: false,
     modelContextWindows: { "deepseek-v4.1-flash-1017": 123 },
     modelDefaultReasoningEfforts: { "deepseek-v4.1-flash-1017": "low" },
@@ -137,7 +138,7 @@ describe.each([
     expect(row.modelDefaultReasoningEfforts!["deepseek-v4.1-flash-1017"]).toBe("low");
     expect(row.defaultModel).toBe("qwen3.8-max");
     expect(row.liveModels).toBe(false);
-    expect(row.baseUrl).toBe("https://example.com/v1");
+    expect(row.baseUrl).toBe(baseUrl);
     expect(projectStartupConfigRepairs(structuredClone(first.config)).changed).toBe(false);
   });
   test("preserves trimmed, extended, reordered, duplicated and empty operator lists", () => {
@@ -168,5 +169,31 @@ describe.each([
     config.providers![entry.provider]!.adapter = "anthropic";
     expect(projectStaleModelRosters(config).changed).toBe(false);
     expect(config.providers![entry.provider]!.models).toEqual(before);
+  });
+});
+
+describe("International roster refresh follows the saved destination", () => {
+  const entry = STALE_MODEL_ROSTERS.find(row => row.provider === "alibaba-token-plan-intl")!;
+  const row = (baseUrl: string | undefined, selectedModels?: string[]) => ({ providers: { [entry.provider]: {
+    adapter: "openai-chat", ...(baseUrl === undefined ? {} : { baseUrl }), models: [...entry.from],
+    ...(selectedModels ? { selectedModels } : {}),
+  } } } as unknown as OcxConfig);
+
+  test("leaves pay-as-you-go and Custom destinations, and their allowlists, untouched", () => {
+    for (const baseUrl of ["https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "https://gateway.example.test/v1"]) {
+      const config = row(baseUrl, ["deepseek-v3.2", "deepseek-v4-flash"]);
+      const original = structuredClone(config);
+      expect(projectStartupConfigRepairs(config).changed).toBe(false);
+      expect(config).toEqual(original);
+    }
+  });
+
+  test("refreshes the Token Plan host in any spelling and a row using the registry default", () => {
+    for (const baseUrl of [undefined, "HTTPS://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/"]) {
+      const config = row(baseUrl);
+      expect(projectStaleModelRosters(config).changed).toBe(true);
+      expect(config.providers![entry.provider]!.models).toEqual([...entry.to]);
+      expect(config.providers![entry.provider]!.baseUrl).toBe(baseUrl);
+    }
   });
 });

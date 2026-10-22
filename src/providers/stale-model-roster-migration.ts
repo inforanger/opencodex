@@ -15,7 +15,8 @@
  * all-or-nothing, so creating one here would hide the rest of the registry seed.
  * Same shape and restraint as `stale-context-window-migration`.
  */
-import { PROVIDER_REGISTRY } from "./registry";
+import { ALIBABA_INTL_TOKEN_PLAN_BASE_URL } from "./base-url-choices";
+import { PROVIDER_REGISTRY, normalizedProviderEndpoint } from "./registry";
 import {
   ALIBABA_TOKEN_PLAN_MODELS,
   ALIBABA_INTL_TOKEN_PLAN_MODELS,
@@ -37,6 +38,12 @@ export interface StaleModelRoster {
   /** Per-model seed values for the added ids, written only into containers that exist. */
   contextWindows?: Readonly<Record<string, number>>;
   defaultReasoningEfforts?: Readonly<Record<string, string>>;
+  /**
+   * For a provider whose saved URL may point elsewhere (pay-as-you-go or Custom), the
+   * destinations whose roster `to` describes. A row on any other URL keeps its list; a row
+   * with no saved URL uses the registry default and is refreshed.
+   */
+  destinationBaseUrls?: readonly string[];
 }
 
 export interface StaleModelRosterProjection {
@@ -71,7 +78,12 @@ export const STALE_MODEL_ROSTERS: readonly StaleModelRoster[] = [
   })),
   ...[
     { provider: "alibaba-token-plan", from: ALIBABA_TOKEN_PLAN_MODELS_BEFORE_1017, to: ALIBABA_TOKEN_PLAN_MODELS },
-    { provider: "alibaba-token-plan-intl", from: ALIBABA_INTL_TOKEN_PLAN_MODELS_BEFORE_1017, to: ALIBABA_INTL_TOKEN_PLAN_MODELS },
+    // International honors pay-as-you-go and Custom URLs, which may still serve the retired ids.
+    // Beijing needs no guard: the router pins it to the registry Token Plan host.
+    {
+      provider: "alibaba-token-plan-intl", from: ALIBABA_INTL_TOKEN_PLAN_MODELS_BEFORE_1017, to: ALIBABA_INTL_TOKEN_PLAN_MODELS,
+      destinationBaseUrls: [ALIBABA_INTL_TOKEN_PLAN_BASE_URL],
+    },
   ].map(entry => ({
     ...entry,
     contextWindows: ALIBABA_TOKEN_PLAN_CONTEXT_WINDOWS,
@@ -88,6 +100,13 @@ function sameList(value: unknown, expected: readonly string[]): boolean {
 function registrySeeds(provider: string, adapter: unknown, roster: readonly string[]): boolean {
   const entry = PROVIDER_REGISTRY.find(row => row.id === provider);
   return entry !== undefined && entry.adapter === adapter && sameList(entry.models, roster);
+}
+
+function servesRoster(baseUrl: unknown, destinations: readonly string[] | undefined): boolean {
+  if (!destinations || baseUrl === undefined || baseUrl === "") return true;
+  if (typeof baseUrl !== "string") return false;
+  const saved = normalizedProviderEndpoint(baseUrl);
+  return destinations.some(url => normalizedProviderEndpoint(url) === saved);
 }
 
 function fillExisting<T>(container: Record<string, T> | undefined, values: Readonly<Record<string, T>> | undefined, ids: readonly string[]): void {
@@ -110,6 +129,7 @@ export function projectStaleModelRosters(
     const prov = config.providers?.[entry.provider];
     if (!prov) continue;
     if (!registrySeeds(entry.provider, prov.adapter, entry.to)) continue;
+    if (!servesRoster(prov.baseUrl, entry.destinationBaseUrls)) continue;
     if (!sameList(prov.models, entry.from)) continue;
     const added = entry.to.filter(id => !entry.from.includes(id));
     prov.models = [...entry.to];
