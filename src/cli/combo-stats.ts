@@ -4,7 +4,7 @@ import { CliUsageError, printData, runtimeBaseUrl, runtimeRequest, takeFlag, tak
 
 const USAGE = "Usage: ocx combo stats <stored-id> [--range <7d|30d|all>] [--json]";
 const SUMMARY_COUNTS = [
-  "decisions", "appliedDecisions", "failOpenDecisions", "successfulRequests", "requestsWithModelFallback",
+  "decisions", "appliedDecisions", "failOpenDecisions", "pinnedRequests", "successfulRequests", "requestsWithModelFallback",
   "modelAttempts", "measuredModelAttempts", "modelInputTokens", "modelOutputTokens", "modelReasoningTokens",
   "modelCacheReadTokens", "modelCacheWriteTokens", "modelTotalTokens", "decisionUsageReported",
   "decisionInputTokens", "decisionOutputTokens", "decisionTotalTokens",
@@ -111,6 +111,7 @@ export async function handleComboStatsCommand(argv: string[], deps: RuntimeApiDe
       `Combo ${id} — JEV observations (${range})`,
       ...(summary.decisions === 0 ? ["No recorded JEV decisions in this window."] : []),
       `Decisions: ${summary.decisions}; applied: ${summary.appliedDecisions}; fail-open: ${summary.failOpenDecisions}`,
+      ...(summary.pinnedRequests > 0 ? [`Session-pinned requests (no decision call): ${summary.pinnedRequests}`] : []),
       `Successful requests: ${summary.successfulRequests}; requests with model fallback: ${summary.requestsWithModelFallback}`,
       `Model tokens: ${summary.modelTotalTokens}; measured attempts: ${summary.measuredModelAttempts}/${summary.modelAttempts}`,
       `Decision tokens: ${summary.decisionTotalTokens}; decisions reporting usage: ${summary.decisionUsageReported}/${summary.decisions}`,
