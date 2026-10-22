@@ -767,9 +767,10 @@ exact ID, so Chat requests omit `response_format`. This is best-effort text, not
 guaranteed JSON. The bare model's verified JSON downgrade and existing Responses
 pins are unchanged. Beijing also includes now-listed `deepseek-v4-pro-0813`;
 International omits retired `deepseek-v3.2` and bare `deepseek-v4-flash` but retains
-`deepseek-v4-flash-0731`. The canonical Beijing host is
-`https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1`; International uses the
-Qwen Cloud Token Plan host above. Historical saved hosts remain recognized.
+`deepseek-v4-flash-0731`. Both presets keep the hosts their official quick starts
+document: Beijing `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` and
+International `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`.
+The Qwen Cloud preset uses the separate Token Plan host that Qwen Cloud documents above.
 See the [1017 model card](https://www.qianwenai.com/models/deepseek-v4.1-flash-1017),
 [Chat reference](https://docs.qwencloud.com/api-reference/chat/openai-chat) and
 [Personal overview](https://help.aliyun.com/en/model-studio/token-plan-personal-overview).

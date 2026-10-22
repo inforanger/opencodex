@@ -61,7 +61,7 @@ describe("the documented Responses opt-in resolves and reaches the native wire",
       const resolved = resolveWireProtocolOverride("alibaba-token-plan", model, provider, "responses");
       expect(resolved.adapter).toBe("openai-responses");
       expect(resolved.apiKey).toBe("sk-test");
-      expect(resolved.baseUrl).toBe("https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1");
+      expect(resolved.baseUrl).toBe("https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1");
     });
   }
 
@@ -113,20 +113,20 @@ describe("the opt-in survives the handleResponses replay", () => {
 
   test("qwen3.8-flash reaches /responses once opted in", async () => {
     const url = await drive("qwen3.8-flash", { "qwen3.8-flash": "openai-responses" });
-    expect(url).toContain("token-plan.maas.qianwenaiapi.com");
+    expect(url).toContain("token-plan.cn-beijing.maas.aliyuncs.com");
     expect(url).toContain("/responses");
     expect(url).not.toContain("chat/completions");
   });
 
   test("an unpinned family member reaches /chat/completions without the opt-in", async () => {
     const url = await drive("qwen3.8-max");
-    expect(url).toContain("token-plan.maas.qianwenaiapi.com");
+    expect(url).toContain("token-plan.cn-beijing.maas.aliyuncs.com");
     expect(url).toContain("chat/completions");
   });
 
   test("an unpinned family member reaches /responses once opted in", async () => {
     const url = await drive("qwen3.8-max", { "qwen3.8-max": "openai-responses" });
-    expect(url).toContain("token-plan.maas.qianwenaiapi.com");
+    expect(url).toContain("token-plan.cn-beijing.maas.aliyuncs.com");
     expect(url).toContain("/responses");
     expect(url).not.toContain("chat/completions");
   });
@@ -218,10 +218,7 @@ describe("1017 exact-ID Token Plan adapter policy", () => {
 
 describe("custom Beijing destination structured-output policy", () => {
   const model = "deepseek-v4.1-flash-1017";
-  for (const baseUrl of [
-    "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
-    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-  ]) {
+  for (const baseUrl of ["https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"]) {
     for (const enriched of [false, true]) {
       test(`${baseUrl} enriched=${enriched} preserves destination opt-outs`, () => {
         const provider: OcxProviderConfig = {
@@ -271,8 +268,9 @@ describe("custom Beijing destination structured-output policy", () => {
   }
   test.each([
     { adapter: "openai-chat", baseUrl: "https://example.test/v1" },
-    { adapter: "anthropic", baseUrl: "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1" },
     { adapter: "anthropic", baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1" },
+    // Undocumented for Token Plan; must not be treated as the Beijing destination.
+    { adapter: "openai-chat", baseUrl: "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1" },
     { adapter: "openai-chat", baseUrl: "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1" },
     { adapter: "openai-chat", baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1" },
   ])("nonmatching custom destination keeps operator policy: $adapter $baseUrl", ({ adapter, baseUrl }) => {

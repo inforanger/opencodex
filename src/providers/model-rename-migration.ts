@@ -256,10 +256,7 @@ function providerStillMatchesRegistry(name: string, prov: OcxProviderConfig): bo
   if (!entry) return false;
   if (!prov.baseUrl || !entry.baseUrl) return true;
   const choices = entry.baseUrlChoices?.map(choice => choice.baseUrl) ?? [];
-  // Destination aliases preserve saved hosts without duplicating registry metadata.
-  const aliases = entry.destinationAliases?.filter(alias => alias.adapter === prov.adapter)
-    .map(alias => alias.baseUrl) ?? [];
-  const known = [entry.baseUrl, ...choices, ...aliases]
+  const known = [entry.baseUrl, ...choices]
     .filter((url): url is string => typeof url === "string")
     .map(normalizedProviderEndpoint);
   return known.includes(normalizedProviderEndpoint(prov.baseUrl));

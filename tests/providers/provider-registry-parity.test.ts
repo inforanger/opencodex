@@ -551,7 +551,7 @@ describe("provider registry parity", () => {
     expect(KEY_LOGIN_PROVIDERS["alibaba-token-plan"]).toMatchObject({
       label: "Alibaba Token Plan (Beijing)",
       adapter: "openai-chat",
-      baseUrl: "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+      baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
       defaultModel: "qwen3.8-max",
       liveModels: false,
       models: [

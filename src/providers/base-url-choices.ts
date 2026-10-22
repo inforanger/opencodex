@@ -1,6 +1,8 @@
 /**
  * Qwen Cloud OpenAI-compatible endpoint presets.
  * Token plan is the GUI default; pay-as-you-go and custom are selectable.
+ * Token plan host per https://docs.qwencloud.com/token-plan/personal/token-plan-personal-quickstart
+ * (checked 2026-10-23); a saved older host stays usable as a custom URL.
  */
 export const QWEN_CLOUD_TOKEN_PLAN_BASE_URL =
   "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1";
@@ -24,12 +26,13 @@ export const QWEN_CLOUD_BASE_URL_CHOICES: readonly ProviderBaseUrlChoice[] = [
 /**
  * Alibaba Token Plan International (ap-southeast-1) endpoint presets.
  * Separate regional account and billing destination; both regions offer both tiers.
- * Note: ALIBABA_INTL_TOKEN_PLAN_BASE_URL intentionally duplicates
- * QWEN_CLOUD_TOKEN_PLAN_BASE_URL — same host, different product branding
- * and preset curation. Kept as a separate constant for clarity.
+ * Alibaba Cloud's own quick start still documents this host (checked 2026-10-23):
+ * https://www.alibabacloud.com/help/en/model-studio/token-plan-personal-quick-start
+ * Qwen Cloud documents a different Token Plan host, so the two constants are
+ * independent and must not be assumed equal.
  */
 export const ALIBABA_INTL_TOKEN_PLAN_BASE_URL =
-  "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1";
+  "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 export const ALIBABA_INTL_PAYG_BASE_URL =
   "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 
