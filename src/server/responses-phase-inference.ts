@@ -18,7 +18,8 @@ import { replaceSseDataPayload, sseDataPayload } from "./sse-payload-rewrite";
  * untouched and forwarded without buffering. Each rewritten message stays
  * buffered until the next protocol event (SSE keepalives keep it pending).
  * Live text deltas are not buffered, but message completion waits for that
- * event. Snapshots reuse each item decision when their phase is absent;
+ * event. Snapshots reuse each item decision when their phase is absent,
+ * matched by item id or, when either side lacks an id, by output index;
  * explicit snapshot phases take precedence, and failed snapshots are untouched.
  */
 
@@ -80,20 +81,48 @@ function withMessagePhase(block: string, phase: OcxMessagePhase): string {
   return replaceSseDataPayload(block, JSON.stringify(patched));
 }
 
-function withSnapshotPhases(block: string, inferred: ReadonlyMap<string, OcxMessagePhase>): string {
+/** One per-item decision, findable by item id and by output index. */
+interface PhaseDecision {
+  readonly id: string | null;
+  readonly index: number | null;
+  readonly phase: OcxMessagePhase;
+}
+
+interface PhaseDecisions {
+  readonly byId: ReadonlyMap<string, PhaseDecision>;
+  readonly byIndex: ReadonlyMap<number, PhaseDecision>;
+}
+
+function outputIndexOf(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/**
+ * The phase already emitted on the wire for the snapshot item at `position`.
+ * An id match wins. A position match is used only when the event or the
+ * snapshot item lacks an id, so two different ids never share a decision.
+ */
+function decidedPhase(decisions: PhaseDecisions, id: string | null, position: number): OcxMessagePhase | undefined {
+  const byId = id !== null ? decisions.byId.get(id) : undefined;
+  if (byId) return byId.phase;
+  const byIndex = decisions.byIndex.get(position);
+  return byIndex && (byIndex.id === null || id === null) ? byIndex.phase : undefined;
+}
+
+function withSnapshotPhases(block: string, decisions: PhaseDecisions): string {
   const parsed = parseDataPayload(block);
   if (!parsed) return block;
   const response = parsed.response;
   if (!isPlainObject(response) || !Array.isArray(response.output)) return block;
   let changed = false;
-  const output = response.output.map((item: unknown) => {
+  const output = response.output.map((item: unknown, position: number) => {
     if (isPlainObject(item) && item.type === "message" && item.phase === undefined) {
       // Mirror the decision already emitted for this item on the wire, so
       // clients reconciling the final snapshot never re-expand a message
       // whose output_item.done said commentary. Items the rewrite never saw
       // (joined mid-stream, no buffered decision) fall back to final_answer.
       const id = typeof item.id === "string" ? item.id : null;
-      const phase = (id !== null ? inferred.get(id) : undefined) ?? "final_answer";
+      const phase = decidedPhase(decisions, id, position) ?? "final_answer";
       changed = true;
       return { ...item, phase };
     }
@@ -112,40 +141,53 @@ export function createResponsesPhaseInferenceBlockRewrite(budget: TranslatorBudg
   // retention budget and are released at a terminal event or teardown.
   let pending: string | null = null;
   let pendingBytes = 0;
-  let inferredBytes = 0;
-  const inferred = new Map<string, OcxMessagePhase>();
+  let decisionBytes = 0;
+  const byId = new Map<string, PhaseDecision>();
+  const byIndex = new Map<number, PhaseDecision>();
+  const decisions: PhaseDecisions = { byId, byIndex };
   const scope = { kind: "retained_collectors" as const };
 
   const clearState = (): void => {
-    budget.releaseRetained(pendingBytes + inferredBytes, scope);
+    budget.releaseRetained(pendingBytes + decisionBytes, scope);
     pending = null;
     pendingBytes = 0;
-    inferredBytes = 0;
-    inferred.clear();
+    decisionBytes = 0;
+    byId.clear();
+    byIndex.clear();
   };
 
-  const rememberPhase = (id: string, phase: OcxMessagePhase): void => {
-    const previous = inferred.get(id);
-    const bytes = Buffer.byteLength(JSON.stringify([id, phase]));
-    const previousBytes = previous === undefined ? 0 : Buffer.byteLength(JSON.stringify([id, previous]));
-    const delta = bytes - previousBytes;
+  const decisionSize = (decision: PhaseDecision): number =>
+    Buffer.byteLength(JSON.stringify([decision.id, decision.index, decision.phase]));
+
+  const rememberPhase = (item: unknown, outputIndex: unknown, phase: OcxMessagePhase): void => {
+    const id = isPlainObject(item) && typeof item.id === "string" ? item.id : null;
+    const index = outputIndexOf(outputIndex);
+    if (id === null && index === null) return;
+    const next: PhaseDecision = { id, index, phase };
+    const replaced = new Set<PhaseDecision>();
+    const previousById = id !== null ? byId.get(id) : undefined;
+    const previousByIndex = index !== null ? byIndex.get(index) : undefined;
+    if (previousById) replaced.add(previousById);
+    if (previousByIndex) replaced.add(previousByIndex);
+    let delta = decisionSize(next);
+    for (const previous of replaced) delta -= decisionSize(previous);
+    // Charge before mutating, so a budget rejection leaves state consistent.
     if (delta > 0) budget.chargeRetained(delta, scope);
     else if (delta < 0) budget.releaseRetained(-delta, scope);
-    inferred.set(id, phase);
-    inferredBytes += delta;
-  };
-
-  const messageIdOf = (block: string): string | null => {
-    const parsed = parseDataPayload(block);
-    const item = parsed?.item;
-    return isPlainObject(item) && typeof item.id === "string" ? item.id : null;
+    for (const previous of replaced) {
+      if (previous.id !== null && byId.get(previous.id) === previous) byId.delete(previous.id);
+      if (previous.index !== null && byIndex.get(previous.index) === previous) byIndex.delete(previous.index);
+    }
+    if (id !== null) byId.set(id, next);
+    if (index !== null) byIndex.set(index, next);
+    decisionBytes += delta;
   };
 
   const releasePending = (phase: OcxMessagePhase): readonly string[] => {
     if (pending === null) return [];
     const block = pending;
-    const id = messageIdOf(block);
-    if (id !== null) rememberPhase(id, phase);
+    const parsed = parseDataPayload(block);
+    rememberPhase(parsed?.item, parsed?.output_index, phase);
     const patched = withMessagePhase(block, phase);
     budget.releaseRetained(pendingBytes, scope);
     pending = null;
@@ -160,7 +202,7 @@ export function createResponsesPhaseInferenceBlockRewrite(budget: TranslatorBudg
       // Turn end: any still-buffered message is the final answer, and the
       // terminal snapshot mirrors the same per-item decisions for consistency.
       const released = releasePending("final_answer");
-      const snapshot = type === "response.failed" ? block : withSnapshotPhases(block, inferred);
+      const snapshot = type === "response.failed" ? block : withSnapshotPhases(block, decisions);
       clearState();
       return [...released, snapshot];
     }
@@ -171,8 +213,8 @@ export function createResponsesPhaseInferenceBlockRewrite(budget: TranslatorBudg
         // instead of buffering a message that an abnormal teardown would
         // otherwise drop before it was ever emitted.
         const released = releasePending("commentary");
-        if (typeof item.id === "string" && (item.phase === "commentary" || item.phase === "final_answer")) {
-          rememberPhase(item.id, item.phase);
+        if (item.phase === "commentary" || item.phase === "final_answer") {
+          rememberPhase(item, parsed?.output_index, item.phase);
         }
         return [...released, block];
       }

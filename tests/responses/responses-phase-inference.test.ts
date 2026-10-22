@@ -147,6 +147,72 @@ describe("Responses phase inference block rewrite", () => {
     rewrite.dispose?.();
   });
 
+  // Ingwannu P2 on #7375: the snapshot must agree with every item-done phase,
+  // including gateways that omit message ids on events or snapshot items.
+  function messageDoneWithoutId(outputIndex: number, text: string, phase?: string): string {
+    const item: Record<string, unknown> = {
+      type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text }],
+    };
+    if (phase) item.phase = phase;
+    return sse("response.output_item.done", { output_index: outputIndex, item });
+  }
+
+  test("id-less messages keep item-done and snapshot phases in agreement by output index", () => {
+    const rewrite = createResponsesPhaseInferenceBlockRewrite(createTestTranslatorBudget());
+    const out = [
+      messageDoneWithoutId(0, "checking the grid"),
+      functionCallAdded(1),
+      messageDoneWithoutId(2, "all done"),
+      completed([
+        { type: "message", role: "assistant" },
+        { type: "function_call", id: "fc_1", call_id: "call_1", name: "shell", arguments: "{}" },
+        { type: "message", role: "assistant" },
+      ]),
+    ].flatMap(b => rewrite(b));
+    expect(out.map(phaseOf)).toEqual(["commentary", undefined, "final_answer", "commentary,,final_answer"]);
+    rewrite.dispose?.();
+  });
+
+  test("an explicit id-less commentary phase is reused by output index", () => {
+    const rewrite = createResponsesPhaseInferenceBlockRewrite(createTestTranslatorBudget());
+    const out = [
+      messageDoneWithoutId(0, "explicit narration", "commentary"),
+      messageDoneWithoutId(1, "answer"),
+      completed([{ type: "message", role: "assistant" }, { type: "message", role: "assistant" }]),
+    ].flatMap(b => rewrite(b));
+    expect(out.map(phaseOf)).toEqual(["commentary", "final_answer", "commentary,final_answer"]);
+    rewrite.dispose?.();
+  });
+
+  test("an id on only one side still matches by output index", () => {
+    const rewrite = createResponsesPhaseInferenceBlockRewrite(createTestTranslatorBudget());
+    const out = [
+      messageDoneWithoutId(0, "narration"),
+      messageDone(1, "more narration"),
+      functionCallAdded(2),
+      completed([
+        { type: "message", id: "msg_0", role: "assistant" },
+        { type: "message", role: "assistant" },
+        { type: "function_call", id: "fc_2", call_id: "call_2", name: "shell", arguments: "{}" },
+      ]),
+    ].flatMap(b => rewrite(b));
+    expect(out.map(phaseOf)).toEqual(["commentary", "commentary", undefined, "commentary,commentary,"]);
+    rewrite.dispose?.();
+  });
+
+  test("a conflicting snapshot id at a known output index still falls back to final_answer", () => {
+    const rewrite = createResponsesPhaseInferenceBlockRewrite(createTestTranslatorBudget());
+    const out = [
+      messageDone(0, "checking"),
+      functionCallAdded(1),
+      completed([{ type: "message", role: "assistant" }, { type: "message", id: "msg_9", role: "assistant" }]),
+    ].flatMap(b => rewrite(b));
+    // Position 0 has no snapshot id, so it inherits msg_0's commentary; msg_9 at
+    // position 1 names a different message and is not matched by position.
+    expect(out.map(phaseOf)).toEqual(["commentary", undefined, "commentary,final_answer"]);
+    rewrite.dispose?.();
+  });
+
   test("explicitly phased messages are forwarded without buffering", () => {
     const rewrite = createResponsesPhaseInferenceBlockRewrite(createTestTranslatorBudget());
     const block = messageDone(0, "hi", "commentary");
