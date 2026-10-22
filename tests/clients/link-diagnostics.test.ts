@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLinkDiagnosticSink, type LinkDiagnosticRecord } from "../../src/link/diagnostics";
 import { resetHardenedStateForTests, setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests,
-  setPlatformForTests } from "../../src/lib/windows-secret-acl";
+  setPlatformForTests, setStatForTests } from "../../src/lib/windows-secret-acl";
 import { setAsyncWindowsPrincipalRunnerForTests, resetWindowsPrincipalForTests } from "../../src/lib/windows-user-principal";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -168,8 +168,14 @@ test.skipIf(process.platform === "win32")("refuses symlink logs without modifyin
 test("Windows diagnostic appends reuse ACLs only until the file or its permissions change", async () => {
   const { configDir, path } = fixture();
   let now = 0, grants = 0;
+  let permissionFreshness: bigint | undefined;
+  const observedStat = (target: string) => {
+    const { dev, ino, ctimeNs } = statSync(target, { bigint: true });
+    return { dev, ino, ctimeNs: target === path ? permissionFreshness ?? ctimeNs : ctimeNs };
+  };
   setPlatformForTests("win32");
   resetHardenedStateForTests();
+  setStatForTests(observedStat);
   setAsyncWindowsPrincipalRunnerForTests(async () => ({ success: true, exitCode: 0, timedOut: false,
     stdout: "S-1-5-21-1-2-3-1001\nTEST\\user\n" }));
   setAsyncIcaclsRunnerForTests(async args => {
@@ -198,8 +204,15 @@ test("Windows diagnostic appends reuse ACLs only until the file or its permissio
     await append();
     expect(grants).toBe(2);
 
+    const beforePermissions = observedStat(path);
     chmodSync(path, 0o400);
     chmodSync(path, 0o600);
+    // Model an observable permission change regardless of the host filesystem's ctime granularity.
+    permissionFreshness = beforePermissions.ctimeNs + 1n;
+    const afterPermissions = observedStat(path);
+    expect(afterPermissions.dev).toBe(beforePermissions.dev);
+    expect(afterPermissions.ino).toBe(beforePermissions.ino);
+    expect(afterPermissions.ctimeNs).not.toBe(beforePermissions.ctimeNs);
     await append();
     expect(records(path)).toHaveLength(3);
     expect(grants).toBe(3);
@@ -207,6 +220,7 @@ test("Windows diagnostic appends reuse ACLs only until the file or its permissio
     await sink.flush();
     setAsyncIcaclsRunnerForTests(null);
     setPlatformForTests(null);
+    setStatForTests(null);
     setAsyncWindowsPrincipalRunnerForTests(null);
     resetWindowsPrincipalForTests();
     resetHardenedStateForTests();
