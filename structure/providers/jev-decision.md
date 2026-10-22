@@ -215,7 +215,8 @@ a decision that replaced a released pin persists the reason. `src/usage/jev-stat
 `pinnedRequests`, never as decisions, gates or backend latency; request success, model fallback and physical
 attempts count every JEV-routed request, pinned or decided. The CLI projection reads an absent `pinnedRequests` as 0.
 Besides a classified failure response, a non-cancellation dispatch, preflight or failure-read exception and a
-committed stream that ends `failed` also forget the pin; `incomplete` is an answer and keeps it.
+committed stream that ends `failed` also forget the pin; `incomplete` is an answer and keeps it. Each forget stamps a
+per-session failure fence, so a request already in flight on that session cannot write the pin back.
 The store holds at most 512 pins with least-recently-written eviction. Coverage:
 `tests/routing/jev-session-pin.test.ts`, `tests/server/server-jev-session-pin.test.ts` and
 `tests/cli/cli-combo-session-pin.test.ts`.

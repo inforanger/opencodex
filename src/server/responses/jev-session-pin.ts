@@ -17,8 +17,9 @@
  * generation change happens after it was written, when its target is not among the request's
  * current JEV choices (disabled, removed, cooling down, quota exhausted, metered or otherwise
  * ineligible), when its effort is no longer offered, when opted-in quota evidence reads
- * `nearly_exhausted`, and when any target of a pinned session fails. A cancelled send writes
- * and releases nothing. Storage is process-local and bounded by `JEV_SESSION_PIN_CAPACITY`.
+ * `nearly_exhausted`, and when any target of a pinned session fails; a request that was already in
+ * flight when that failure was recorded cannot write the pin back. A cancelled send writes and
+ * releases nothing. Storage is process-local and bounded by `JEV_SESSION_PIN_CAPACITY`.
  */
 import type { JevCandidate, JevDecision, JevDecisionBackend } from "../../combos/jev";
 import { jevQuotaSignalForTarget } from "../../combos/jev-quota";
@@ -41,6 +42,14 @@ interface PinEntry {
 }
 
 const pins = new Map<string, PinEntry>();
+/**
+ * Failure fence per session key. `forget()` stamps the key with a fresh sequence number; a request
+ * that started before that stamp may no longer write the pin back, so a concurrent completion on
+ * the same session cannot restore a target another request just saw fail. Bounded like the pins:
+ * an evicted stamp reads as 0, which only re-admits writers that started before any failure.
+ */
+const failureFences = new Map<string, number>();
+let failureSequence = 0;
 
 function callerNamespace(admission: DataPlaneAdmission | undefined): string {
   if (!admission) return "unadmitted";
@@ -57,6 +66,16 @@ function write(key: string, entry: PinEntry): void {
     const oldest = pins.keys().next().value;
     if (oldest === undefined) break;
     pins.delete(oldest);
+  }
+}
+
+function fenceFailure(key: string): void {
+  failureFences.delete(key);
+  failureFences.set(key, ++failureSequence);
+  while (failureFences.size > JEV_SESSION_PIN_CAPACITY) {
+    const oldest = failureFences.keys().next().value;
+    if (oldest === undefined) break;
+    failureFences.delete(oldest);
   }
 }
 
@@ -99,6 +118,7 @@ export function jevSessionPinScope(args: {
   if (args.combo.strategy !== "jev" || ttlMs === undefined || !args.lane) return undefined;
   const key = `${callerNamespace(args.admission)}\u0000${args.comboId}\u0000${args.lane}`;
   const now = args.now ?? Date.now;
+  const fence = failureFences.get(key) ?? 0;
   const release = (reason: JevSessionPinRelease): JevSessionPinReuse => {
     pins.delete(key);
     return { released: reason };
@@ -136,6 +156,8 @@ export function jevSessionPinScope(args: {
     complete(completedTargetKey, decision, writerGeneration) {
       // A config change while the response was in flight makes this completion obsolete.
       if (writerGeneration !== captureConfigGeneration()) return;
+      // So does a failure on this session reported after this request started.
+      if ((failureFences.get(key) ?? 0) !== fence) return;
       if (!decision) {
         const entry = pins.get(key);
         if (entry && entry.targetKey === completedTargetKey && entry.generation === writerGeneration) {
@@ -155,6 +177,7 @@ export function jevSessionPinScope(args: {
     },
     forget() {
       pins.delete(key);
+      fenceFailure(key);
     },
   };
 }
@@ -162,6 +185,7 @@ export function jevSessionPinScope(args: {
 /** Test-only reset, alongside the Combo recall and rotation resets. */
 export function clearJevSessionPinsForTests(): void {
   pins.clear();
+  failureFences.clear();
 }
 
 /** Test-only view of the retained pin count. */

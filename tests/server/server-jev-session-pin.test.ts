@@ -204,6 +204,23 @@ describe("JEV session pin (#7525)", () => {
     expect(decisions).toHaveLength(3);
   });
 
+  test("a stream that reports failed after the Combo committed it ends the pin", async () => {
+    const decisions: string[] = [];
+    const config = makeConfig("sol/gpt-5.6-sol:high", decisions, true);
+    await turn(config);
+    let committedOptions: ChildOptions;
+    const lateFailure: Child = (body, _complete, options) => {
+      committedOptions = options;
+      return Response.json({ id: "resp-late", object: "response", status: "completed", model: body.model, output: [] });
+    };
+    expect((await turn(config, { child: lateFailure })).status).toBe(200);
+    expect(decisions).toHaveLength(1);
+    // The callback gate is committed once the Combo returned the response; the stream fails later.
+    committedOptions?.onNativePassthroughTerminal?.("failed");
+    await turn(config);
+    expect(decisions).toHaveLength(2);
+  });
+
   test("a cancelled send neither writes nor drops the pin", async () => {
     const decisions: string[] = [];
     const config = makeConfig("sol/gpt-5.6-sol:high", decisions, true);

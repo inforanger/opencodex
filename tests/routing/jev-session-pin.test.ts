@@ -158,6 +158,20 @@ describe("JEV session pin scope", () => {
     expect(pin.reuse([sol])).toEqual({});
   });
 
+  test("a request already in flight when another one fails cannot restore the pin", () => {
+    scope().complete(sol.key, applied, captureConfigGeneration());
+    const inFlight = scope();
+    const failing = scope();
+    failing.forget();
+    inFlight.complete(sol.key, { ...applied, pinned: true, pinReason: "session" }, captureConfigGeneration());
+    inFlight.complete(sol.key, applied, captureConfigGeneration());
+    expect(scope().reuse([sol])).toEqual({});
+    // A request that starts after the failure decides afresh and may pin again.
+    const next = scope();
+    next.complete(sol.key, applied, captureConfigGeneration());
+    expect(scope().reuse([sol]).decision?.pinned).toBe(true);
+  });
+
   test("the store is bounded and evicts the least recently written session", () => {
     for (let lane = 0; lane <= JEV_SESSION_PIN_CAPACITY; lane += 1) {
       scope({ lane: `lane-${lane}` }).complete(sol.key, applied, captureConfigGeneration());
