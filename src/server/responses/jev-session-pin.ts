@@ -45,11 +45,14 @@ const pins = new Map<string, PinEntry>();
 /**
  * Failure fence per session key. `forget()` stamps the key with a fresh sequence number; a request
  * that started before that stamp may no longer write the pin back, so a concurrent completion on
- * the same session cannot restore a target another request just saw fail. Bounded like the pins:
- * an evicted stamp reads as 0, which only re-admits writers that started before any failure.
+ * the same session cannot restore a target another request just saw fail. Bounded like the pins;
+ * because an evicted stamp is unknowable, a writer whose key has no stamp is also refused once any
+ * stamp was evicted after it started.
  */
 const failureFences = new Map<string, number>();
 let failureSequence = 0;
+/** `failureSequence` at the most recent fence eviction. */
+let fenceEvictedAt = 0;
 
 function callerNamespace(admission: DataPlaneAdmission | undefined): string {
   if (!admission) return "unadmitted";
@@ -76,6 +79,7 @@ function fenceFailure(key: string): void {
     const oldest = failureFences.keys().next().value;
     if (oldest === undefined) break;
     failureFences.delete(oldest);
+    fenceEvictedAt = failureSequence;
   }
 }
 
@@ -119,6 +123,7 @@ export function jevSessionPinScope(args: {
   const key = `${callerNamespace(args.admission)}\u0000${args.comboId}\u0000${args.lane}`;
   const now = args.now ?? Date.now;
   const fence = failureFences.get(key) ?? 0;
+  const startedAtSequence = failureSequence;
   const release = (reason: JevSessionPinRelease): JevSessionPinReuse => {
     pins.delete(key);
     return { released: reason };
@@ -157,7 +162,9 @@ export function jevSessionPinScope(args: {
       // A config change while the response was in flight makes this completion obsolete.
       if (writerGeneration !== captureConfigGeneration()) return;
       // So does a failure on this session reported after this request started.
-      if ((failureFences.get(key) ?? 0) !== fence) return;
+      const currentFence = failureFences.get(key);
+      if ((currentFence ?? 0) !== fence) return;
+      if (currentFence === undefined && fenceEvictedAt > startedAtSequence) return;
       if (!decision) {
         const entry = pins.get(key);
         if (entry && entry.targetKey === completedTargetKey && entry.generation === writerGeneration) {
@@ -186,6 +193,8 @@ export function jevSessionPinScope(args: {
 export function clearJevSessionPinsForTests(): void {
   pins.clear();
   failureFences.clear();
+  failureSequence = 0;
+  fenceEvictedAt = 0;
 }
 
 /** Test-only view of the retained pin count. */

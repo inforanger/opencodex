@@ -172,6 +172,18 @@ describe("JEV session pin scope", () => {
     expect(scope().reuse([sol]).decision?.pinned).toBe(true);
   });
 
+  test("an evicted failure fence still refuses a writer that started before it", () => {
+    scope().complete(sol.key, applied, captureConfigGeneration());
+    const inFlight = scope();
+    scope().forget();
+    for (let lane = 0; lane <= JEV_SESSION_PIN_CAPACITY; lane += 1) scope({ lane: `other-${lane}` }).forget();
+    inFlight.complete(sol.key, applied, captureConfigGeneration());
+    expect(scope().reuse([sol])).toEqual({});
+    const next = scope();
+    next.complete(sol.key, applied, captureConfigGeneration());
+    expect(scope().reuse([sol]).decision?.pinned).toBe(true);
+  });
+
   test("the store is bounded and evicts the least recently written session", () => {
     for (let lane = 0; lane <= JEV_SESSION_PIN_CAPACITY; lane += 1) {
       scope({ lane: `lane-${lane}` }).complete(sol.key, applied, captureConfigGeneration());
