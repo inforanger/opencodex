@@ -1,7 +1,10 @@
 import { clientLinkStatusIdentity } from "../client/link-status";
 import { clientLinkTunnelStatus } from "../client/link-tunnel";
 import { loadConfig } from "../config";
-import { projectLinkStatus, type ClientLinkIdentity, type LinkStatusConfig, type LinkStatusDto } from "../link/status-projection";
+import {
+  projectLinkStatus, type ClientLinkIdentity, type LinkStatusConfig, type LinkStatusDto, type LinkTunnelDiagnostics,
+} from "../link/status-projection";
+import { TUNNEL_CAUSES } from "../link/tunnel-history";
 import { isEpochMs, type LinkChildParity } from "../link/child-parity";
 import { CODEX_SETTINGS_DIGEST_PATTERN } from "../link/codex-settings";
 import type { LinkLocalPeer, LinkPeerStatus } from "../link/compatibility";
@@ -169,7 +172,7 @@ function validateStatus(value: unknown): LinkStatusPayload {
     if (!isRecord(candidate)) throw new Error(`invalid link API response: link ${index}`);
     // The OCX-6 parity fields are optional on the wire (an older runtime omits them) and always
     // present in this output, null when absent.
-    assertKeys(candidate, ["id", "alias", "direction", "state", "since", "reason", "tunnelPort"], [...PARITY_KEYS, "peer"], `link ${index}`);
+    assertKeys(candidate, ["id", "alias", "direction", "state", "since", "reason", "tunnelPort"], [...PARITY_KEYS, "peer", "tunnel"], `link ${index}`);
     const parity = validateParity(candidate, index);
     if (typeof candidate.id !== "string" || !LINK_ID.test(candidate.id)
       || !validString(candidate.alias) || (candidate.direction !== "hub-initiated" && candidate.direction !== "client-initiated")
@@ -187,6 +190,7 @@ function validateStatus(value: unknown): LinkStatusPayload {
       tunnelPort: candidate.tunnelPort,
       ...parity,
       ...(candidate.peer !== undefined ? { peer: validatePeer(candidate.peer, index) } : {}),
+      ...(candidate.tunnel !== undefined ? { tunnel: validateTunnel(candidate.tunnel, index) } : {}),
     } as LinkStatusPayload["links"][number];
   });
   let child: LinkStatusPayload["child"] = null;
@@ -310,8 +314,9 @@ async function runStatus(args: string[], deps: LinkCliDeps): Promise<void> {
     }
     throw error;
   }
-  // A proxy older than the compatibility report ignores the query and answers the exact K16 shape.
-  const result = validateStatus(await linkRequest<unknown>("/api/link/status?compatibility=1", {}, { ...deps, baseUrl }));
+  // A proxy older than the compatibility report or the tunnel diagnostics ignores the query and
+  // answers without those fields.
+  const result = validateStatus(await linkRequest<unknown>("/api/link/status?compatibility=1&diagnostics=1", {}, { ...deps, baseUrl }));
   console.log(JSON.stringify(result));
 }
 
@@ -385,6 +390,33 @@ export async function runLinkCommand(rawArgs: string[], deps: LinkCliDeps = {}):
 }
 
 const PARITY_KEYS = ["lastApplyAt", "runtimeStartedAt", "appliedCodexSettingsDigest", "reportedAt"] as const;
+const WIRE_STATES = new Set(["connecting", "connected", "reconnecting", "failed", "idle"]);
+const CAUSES = new Set<string>(TUNNEL_CAUSES);
+
+function validIso(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value));
+}
+
+function validateTunnel(value: unknown, index: number): LinkTunnelDiagnostics {
+  const fail = (): never => { throw new Error(`invalid link API response: link ${index} tunnel`); };
+  if (!isRecord(value)) return fail();
+  assertExactKeys(value, ["attempt", "nextRetryAt", "lastTransition", "lastFailure"], `link ${index} tunnel`);
+  const { attempt, nextRetryAt, lastTransition, lastFailure } = value;
+  if (typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 0) fail();
+  if (nextRetryAt !== null && !validIso(nextRetryAt)) fail();
+  if (lastTransition !== null) {
+    if (!isRecord(lastTransition)) return fail();
+    assertExactKeys(lastTransition, ["from", "to", "at", "cause"], `link ${index} tunnel transition`);
+    if (!WIRE_STATES.has(lastTransition.from as string) || !WIRE_STATES.has(lastTransition.to as string)
+      || !validIso(lastTransition.at) || (lastTransition.cause !== null && !CAUSES.has(lastTransition.cause as string))) fail();
+  }
+  if (lastFailure !== null) {
+    if (!isRecord(lastFailure)) return fail();
+    assertExactKeys(lastFailure, ["cause", "at"], `link ${index} tunnel failure`);
+    if (!CAUSES.has(lastFailure.cause as string) || !validIso(lastFailure.at)) fail();
+  }
+  return value as unknown as LinkTunnelDiagnostics;
+}
 
 function validateParity(candidate: Record<string, unknown>, index: number): LinkChildParity {
   const time = (key: "lastApplyAt" | "runtimeStartedAt" | "reportedAt"): number | null => {

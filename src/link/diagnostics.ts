@@ -7,23 +7,31 @@ import { linkDir } from "./paths";
 import type { TunnelState } from "./tunnel-state";
 
 export type LinkDiagnosticRecord = {
-  event: "owner_lookup" | "relay_retry" | "relay_failure" | "relay_recovered";
+  event: "owner_lookup" | "relay_retry" | "relay_failure" | "relay_recovered" | "tunnel_transition";
   outcome: "match" | "mismatch" | "lookup_error" | "deadline" | "stale" | "unavailable"
     | "identity_unknown" | "identity_mismatch" | "auth_timeout" | "auth_failed"
-    | "transport_error" | "client_abort" | "header_timeout" | "recovered";
+    | "transport_error" | "client_abort" | "header_timeout" | "recovered"
+    // tunnel_transition: the Home's -R tunnel changed state, and why (src/link/tunnel-history.ts).
+    | "connected" | "spawned" | "stopped" | "auth" | "hostkey" | "forward" | "remote_forward_conflict"
+    | "timeout" | "network" | "unknown" | "spawn_failed" | "listener_unavailable";
   requestId?: string;
   checkId?: string;
   generation?: number;
   state?: string;
+  previousState?: string;
   elapsedMs?: number;
   attempt?: number;
+  tunnelPort?: number;
+  retryAfterMs?: number;
 };
 export type LinkDiagnosticSink = (record: LinkDiagnosticRecord) => void;
 
-const EVENTS = new Set(["owner_lookup", "relay_retry", "relay_failure", "relay_recovered"]);
+const EVENTS = new Set(["owner_lookup", "relay_retry", "relay_failure", "relay_recovered", "tunnel_transition"]);
 const OUTCOMES = new Set([
   "match", "mismatch", "lookup_error", "deadline", "stale", "unavailable", "identity_unknown",
   "identity_mismatch", "auth_timeout", "auth_failed", "transport_error", "client_abort", "header_timeout", "recovered",
+  "connected", "spawned", "stopped", "auth", "hostkey", "forward", "remote_forward_conflict", "timeout", "network",
+  "unknown", "spawn_failed", "listener_unavailable",
 ]);
 const STATES = new Set<TunnelState["kind"]>(["idle", "connecting", "connected", "reconnecting", "failed"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -32,7 +40,7 @@ const MAX_BYTES = 256 * 1024;
 /** Copy only bounded enum, UUID and numeric fields; unknown fields never reach disk. */
 function metadata(record: LinkDiagnosticRecord): LinkDiagnosticRecord | null {
   if (!record) return null;
-  const { event, outcome, state } = record;
+  const { event, outcome, state, previousState } = record;
   if (!EVENTS.has(event) || !OUTCOMES.has(outcome)) return null;
   const result: LinkDiagnosticRecord = { event, outcome };
   for (const key of ["requestId", "checkId"] as const) {
@@ -40,11 +48,14 @@ function metadata(record: LinkDiagnosticRecord): LinkDiagnosticRecord | null {
     if (typeof value === "string" && value.length === 36 && UUID.test(value)) result[key] = value;
   }
   if (typeof state === "string" && STATES.has(state as TunnelState["kind"])) result.state = state;
-  for (const key of ["generation", "elapsedMs", "attempt"] as const) {
+  if (typeof previousState === "string" && STATES.has(previousState as TunnelState["kind"])) result.previousState = previousState;
+  for (const key of ["generation", "elapsedMs", "attempt", "retryAfterMs"] as const) {
     const value = record[key];
     if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER
-      && (key === "elapsedMs" || Number.isSafeInteger(value))) result[key] = value;
+      && (key === "elapsedMs" || key === "retryAfterMs" || Number.isSafeInteger(value))) result[key] = value;
   }
+  const { tunnelPort } = record;
+  if (typeof tunnelPort === "number" && Number.isInteger(tunnelPort) && tunnelPort >= 1 && tunnelPort <= 65_535) result.tunnelPort = tunnelPort;
   return result;
 }
 
