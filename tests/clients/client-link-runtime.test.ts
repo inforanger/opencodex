@@ -84,22 +84,54 @@ test("link runtime refuses a busy configured port instead of selecting an epheme
   }
 });
 
-test.each(["SIGINT", "SIGTERM"])("%s shutdown persists queued diagnostics before process exit", async signal => {
+test.each(["SIGINT", "SIGTERM", "restart"])("%s shutdown persists queued diagnostics before process exit", async signal => {
   const root = mkdtempSync(join(tmpdir(), "ocx-client-signal-diagnostics-"));
   const source = `
+    import { mock } from "bun:test";
+    import { readFileSync } from "node:fs";
+    import { join } from "node:path";
     import { getDefaultConfig, saveConfig } from ${JSON.stringify(repoPath("src/config.ts"))};
     import { startClientRuntime } from ${JSON.stringify(repoPath("src/client/runtime.ts"))};
     import { recordLinkDiagnostic } from ${JSON.stringify(repoPath("src/link/diagnostics.ts"))};
+    import { createLocalAttestationChallenge } from ${JSON.stringify(repoPath("src/lib/local-management-attestation.ts"))};
+    import { createSystemRestartCapability, SYSTEM_RESTART_CAPABILITY_HEADER,
+      SYSTEM_RESTART_EXPECTED_PID_HEADER, SYSTEM_RESTART_NONCE_HEADER, SYSTEM_RESTART_PATH
+    } from ${JSON.stringify(repoPath("src/lib/system-restart-contract.ts"))};
+    const record = () => {
+      recordLinkDiagnostic({ event: "relay_failure", outcome: "auth_failed" });
+      recordLinkDiagnostic({ event: "relay_retry", outcome: "deadline" });
+      recordLinkDiagnostic({ event: "relay_recovered", outcome: "recovered" });
+    };
+    if (${JSON.stringify(signal)} === "restart") {
+      const replacement = await import(${JSON.stringify(repoPath("src/server/restart-replacement.ts"))});
+      mock.module(${JSON.stringify(repoPath("src/server/restart-replacement.ts"))}, () => ({
+        ...replacement,
+        spawnReplacementStart: async () => { record(); },
+      }));
+    }
     const config = getDefaultConfig();
     config.port = ${freePort()};
     config.runtimeRole = "client";
     config.client = ${JSON.stringify(linkClientState())};
     saveConfig(config);
-    await startClientRuntime({ block: false });
-    recordLinkDiagnostic({ event: "relay_failure", outcome: "auth_failed" });
-    recordLinkDiagnostic({ event: "relay_retry", outcome: "deadline" });
-    recordLinkDiagnostic({ event: "relay_recovered", outcome: "recovered" });
-    process.emit(${JSON.stringify(signal)}, ${JSON.stringify(signal)});
+    await startClientRuntime({ block: false }, { restartSupervisor: async () => null });
+    if (${JSON.stringify(signal)} === "restart") {
+      const { attestationSecret, port } = JSON.parse(readFileSync(join(process.env.OPENCODEX_HOME, "runtime-port.json"), "utf8"));
+      const nonce = createLocalAttestationChallenge();
+      const response = await fetch('http://127.0.0.1:' + port + SYSTEM_RESTART_PATH, {
+        method: "POST", headers: {
+          Connection: "close",
+          [SYSTEM_RESTART_EXPECTED_PID_HEADER]: String(process.pid),
+          [SYSTEM_RESTART_NONCE_HEADER]: nonce,
+          [SYSTEM_RESTART_CAPABILITY_HEADER]: createSystemRestartCapability(attestationSecret, nonce, "POST", SYSTEM_RESTART_PATH, process.pid, port),
+        },
+      });
+      await response.arrayBuffer();
+      if (response.status !== 202) throw new Error('restart refused: ' + response.status);
+    } else {
+      record();
+      process.emit(${JSON.stringify(signal)}, ${JSON.stringify(signal)});
+    }
   `;
   const child = Bun.spawn([process.execPath, "-e", source], {
     cwd: root,

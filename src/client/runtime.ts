@@ -420,7 +420,10 @@ export async function startClientRuntime(
         await recycleStandalone(state.value.tokenFingerprint);
       }
     },
-    exitProcess: code => { process.exit(code); },
+    exitProcess: async code => {
+      await flushLinkDiagnostics();
+      process.exit(code);
+    },
   });
 
   installCrashGuards();
