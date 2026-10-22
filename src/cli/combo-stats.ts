@@ -4,7 +4,7 @@ import { CliUsageError, printData, runtimeBaseUrl, runtimeRequest, takeFlag, tak
 
 const USAGE = "Usage: ocx combo stats <stored-id> [--range <7d|30d|all>] [--json]";
 const SUMMARY_COUNTS = [
-  "decisions", "appliedDecisions", "failOpenDecisions", "pinnedRequests", "successfulRequests", "requestsWithModelFallback",
+  "decisions", "appliedDecisions", "failOpenDecisions", "successfulRequests", "requestsWithModelFallback",
   "modelAttempts", "measuredModelAttempts", "modelInputTokens", "modelOutputTokens", "modelReasoningTokens",
   "modelCacheReadTokens", "modelCacheWriteTokens", "modelTotalTokens", "decisionUsageReported",
   "decisionInputTokens", "decisionOutputTokens", "decisionTotalTokens",
@@ -53,6 +53,8 @@ function projectStats(value: unknown, id: string, range: string) {
   const rawSummary = record(dto.summary);
   const summary = {
     ...counts(rawSummary, SUMMARY_COUNTS),
+    // Absent means zero: a proxy started before session pins (#7525) does not report the field.
+    pinnedRequests: Object.hasOwn(rawSummary, "pinnedRequests") ? number(rawSummary.pinnedRequests) : 0,
     averageLatencyMs: nullable(rawSummary.averageLatencyMs),
     averageConfidence: nullable(rawSummary.averageConfidence, 1),
     averageChosenProbability: nullable(rawSummary.averageChosenProbability, 1),

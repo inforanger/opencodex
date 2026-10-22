@@ -1018,6 +1018,8 @@ export async function executeComboResponses(
         if (childLog.terminalIncompleteReason !== undefined) logCtx.terminalIncompleteReason = childLog.terminalIncompleteReason;
         if (childLog.terminalErrorCode !== undefined) logCtx.terminalErrorCode = childLog.terminalErrorCode;
         if (childLog.upstreamError !== undefined) logCtx.upstreamError = childLog.upstreamError;
+        // A committed stream that ends failed is a target failure too; incomplete is an answer.
+        if (status === "failed") jevPin?.forget();
         options.onNativePassthroughTerminal?.(status);
       },
     });
@@ -1091,6 +1093,7 @@ export async function executeComboResponses(
         retainCancelledAttempt();
         return clientCancelledResponse();
       }
+      jevPin?.forget();
       finishRequestAttempt(attempt, 502, Date.now() - started, childLog.usage);
       throw error;
     }
@@ -1115,6 +1118,7 @@ export async function executeComboResponses(
           retainCancelledAttempt();
           return clientCancelledResponse();
         }
+        jevPin?.forget();
         finishRequestAttempt(attempt, 502, Date.now() - started, childLog.usage);
         throw error;
       }
@@ -1171,6 +1175,7 @@ export async function executeComboResponses(
         retainCancelledAttempt();
         return clientCancelledResponse();
       }
+      jevPin?.forget();
       finishRequestAttempt(attempt, 502, Date.now() - started, childLog.usage);
       throw error;
     }

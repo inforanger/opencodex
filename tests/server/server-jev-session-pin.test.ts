@@ -67,14 +67,15 @@ function makeConfig(choice: string, decisions: string[], sessionPin: boolean): O
   };
 }
 
-type Child = (body: Record<string, unknown>, complete: () => void) => Response | Promise<Response>;
+type ChildOptions = Parameters<ResponsesDispatchers["handleResponses"]>[3];
+type Child = (body: Record<string, unknown>, complete: () => void, options: ChildOptions) => Response | Promise<Response>;
 
 /** Children complete like a real stream: the completion callback runs before the response returns. */
 function dispatchers(child: Child): ResponsesDispatchers {
   return {
     async handleResponses(request, _config, _logCtx, options) {
       const body = await request.json() as Record<string, unknown>;
-      return child(body, () => options?.onResponseComplete?.(String(body.model)));
+      return child(body, () => options?.onResponseComplete?.(String(body.model)), options);
     },
     async handleComboResponses() {
       throw new Error("nested combo dispatch is not expected");
@@ -106,9 +107,9 @@ async function turn(config: OcxConfig, options: {
       translatorBudget: budget,
       ...(options.admission ? { admission: options.admission } : {}),
       ...(options.signal ? { abortSignal: options.signal } : {}),
-    }, dispatchers((childBody, complete) => {
+    }, dispatchers((childBody, complete, childOptions) => {
       options.models?.push(String(childBody.model));
-      return child(childBody, complete);
+      return child(childBody, complete, childOptions);
     }));
   } finally {
     budget.dispose();
@@ -182,6 +183,25 @@ describe("JEV session pin (#7525)", () => {
     await turn(config, { log });
     expect(decisions).toHaveLength(2);
     expect(log.jevDecision).not.toHaveProperty("pinned");
+  });
+
+  test("a pinned stream that ends failed, or a dispatch that throws, also ends the pin", async () => {
+    const decisions: string[] = [];
+    const config = makeConfig("sol/gpt-5.6-sol:high", decisions, true);
+    await turn(config);
+    const failedStream: Child = (body, _complete, options) => {
+      options?.onNativePassthroughTerminal?.("failed");
+      return Response.json({ id: "resp-failed", object: "response", status: "completed", model: body.model, output: [] });
+    };
+    await turn(config, { child: failedStream });
+    expect(decisions).toHaveLength(1);
+    await turn(config);
+    expect(decisions).toHaveLength(2);
+    const thrown: Child = () => { throw new Error("transport exploded"); };
+    await expect(turn(config, { child: thrown })).rejects.toThrow("transport exploded");
+    expect(decisions).toHaveLength(2);
+    await turn(config);
+    expect(decisions).toHaveLength(3);
   });
 
   test("a cancelled send neither writes nor drops the pin", async () => {

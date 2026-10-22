@@ -212,7 +212,10 @@ not read `nearly_exhausted`; otherwise the pin is released and JEV decides. Any 
 request forgets the pin, cancellation does not, and a config generation change invalidates both stored pins and
 in-flight writers. A reused turn sends no decision request and persists `pinned: true` with `pinReason: "session"`;
 a decision that replaced a released pin persists the reason. `src/usage/jev-stats.ts` counts pinned turns as
-`pinnedRequests`, never as decisions, gates or backend latency, while their physical attempts still count per model.
+`pinnedRequests`, never as decisions, gates or backend latency; request success, model fallback and physical
+attempts count every JEV-routed request, pinned or decided. The CLI projection reads an absent `pinnedRequests` as 0.
+Besides a classified failure response, a non-cancellation dispatch, preflight or failure-read exception and a
+committed stream that ends `failed` also forget the pin; `incomplete` is an answer and keeps it.
 The store holds at most 512 pins with least-recently-written eviction. Coverage:
 `tests/routing/jev-session-pin.test.ts`, `tests/server/server-jev-session-pin.test.ts` and
 `tests/cli/cli-combo-session-pin.test.ts`.

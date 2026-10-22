@@ -393,10 +393,19 @@ class StreamingJevStatsAccumulator implements JevStatsAccumulator {
       || (this.until !== undefined && entry.timestamp > this.until)) return;
     const decision = normalizePersistedJevDecision(entry.jevDecision);
     if (!decision || (this.comboId !== null && decision.comboId !== this.comboId)) return;
+    const attempts = sentAttempts(entry);
+    // Request-level outcomes count every JEV-routed request, pinned or decided.
+    if (entry.status >= 200 && entry.status < 400) {
+      this.successfulRequests = saturatingAdd(this.successfulRequests, 1);
+    }
+    if (attempts.some(({ provider, model }) => provider !== decision.selected.provider
+      || model !== decision.selected.model)) {
+      this.requestsWithModelFallback = saturatingAdd(this.requestsWithModelFallback, 1);
+    }
+    this.addAttempts(attempts);
     if (decision.pinned) {
-      // A session-pinned turn sent no decision request: it adds physical attempts and tokens only.
+      // A session-pinned turn sent no decision request, so it stays out of every decision total.
       this.pinnedRequests = saturatingAdd(this.pinnedRequests, 1);
-      this.addAttempts(sentAttempts(entry));
       return;
     }
 
@@ -410,9 +419,6 @@ class StreamingJevStatsAccumulator implements JevStatsAccumulator {
     this.averageLatencyMs = nextMean(this.averageLatencyMs, this.decisions, decision.latencyMs);
     this.decisions = saturatingAdd(this.decisions, 1);
     if (decision.gate === "apply") this.appliedDecisions = saturatingAdd(this.appliedDecisions, 1);
-    if (entry.status >= 200 && entry.status < 400) {
-      this.successfulRequests = saturatingAdd(this.successfulRequests, 1);
-    }
     this.gates.set(decision.gate, saturatingAdd(this.gates.get(decision.gate) ?? 0, 1));
     if (decision.confidence !== undefined) {
       this.confidenceTotal = saturatingAdd(this.confidenceTotal, decision.confidence);
@@ -437,13 +443,6 @@ class StreamingJevStatsAccumulator implements JevStatsAccumulator {
       decision.selected.effort,
       saturatingAdd(selected.effortCounts.get(decision.selected.effort) ?? 0, 1),
     );
-
-    const attempts = sentAttempts(entry);
-    if (attempts.some(({ provider, model }) => provider !== decision.selected.provider
-      || model !== decision.selected.model)) {
-      this.requestsWithModelFallback = saturatingAdd(this.requestsWithModelFallback, 1);
-    }
-    this.addAttempts(attempts);
   }
 
   private addAttempts(attempts: readonly SentAttempt[]): void {

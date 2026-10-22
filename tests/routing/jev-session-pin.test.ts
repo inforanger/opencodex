@@ -188,19 +188,26 @@ describe("persisted session pin evidence", () => {
     expect(normalizePersistedJevDecision({ ...base, pinned: true, pinReason: "expired" })).toBeUndefined();
   });
 
-  test("stats count pinned turns apart from decisions while keeping their physical tokens", () => {
-    const entry = (jevDecision: Record<string, unknown>, timestamp: number) => ({
+  test("stats count pinned turns apart from decisions while keeping their physical tokens and request outcomes", () => {
+    const entry = (jevDecision: Record<string, unknown>, timestamp: number, provider = "sol") => ({
       timestamp,
       status: 200,
       jevDecision,
-      attempts: [{ provider: "sol", model: "gpt-5.6-sol", sendCount: 1, usageStatus: "reported", usage: { inputTokens: 100, outputTokens: 5, cacheReadInputTokens: 80 } }],
+      attempts: [{ provider, model: "gpt-5.6-sol", sendCount: 1, usageStatus: "reported", usage: { inputTokens: 100, outputTokens: 5, cacheReadInputTokens: 80 } }],
     }) as unknown as PersistedUsageEntry;
     const accumulator = createJevStatsAccumulator({ comboId: "auto" });
     accumulator.add(entry({ ...base, latencyMs: 40 }, 1));
     accumulator.add(entry({ ...base, pinned: true, pinReason: "session" }, 2));
+    accumulator.add(entry({ ...base, pinned: true, pinReason: "session" }, 3, "luna"));
     const stats = accumulator.clone().summarize("all", 3);
-    expect(stats.summary).toMatchObject({ decisions: 1, appliedDecisions: 1, pinnedRequests: 1, modelAttempts: 2, modelCacheReadTokens: 160, averageLatencyMs: 40 });
+    expect(stats.summary).toMatchObject({
+      decisions: 1, appliedDecisions: 1, pinnedRequests: 2, successfulRequests: 3, requestsWithModelFallback: 1,
+      modelAttempts: 3, modelCacheReadTokens: 240, averageLatencyMs: 40,
+    });
     expect(stats.gates).toEqual([{ gate: "apply", decisions: 1 }]);
-    expect(stats.models).toEqual([expect.objectContaining({ provider: "sol", picks: 1, attempts: 2, inputTokens: 200 })]);
+    expect(stats.models).toEqual([
+      expect.objectContaining({ provider: "sol", picks: 1, attempts: 2, inputTokens: 200 }),
+      expect.objectContaining({ provider: "luna", picks: 0, attempts: 1 }),
+    ]);
   });
 });

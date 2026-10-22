@@ -314,7 +314,8 @@ restart.
 Usage records mark a reused turn with `jevDecision.pinned: true` and `pinReason: "session"`. A
 decision that replaced a released pin records why in `pinReason` (`expired`, `config_changed`,
 `target_unavailable`, `effort_unavailable` or `quota_nearly_exhausted`). `ocx combo stats`
-counts pinned requests apart from decisions, and their model tokens still count per model.
+counts pinned requests apart from decisions; they still count toward successful requests, model
+fallbacks and per-model tokens.
 
 A pin makes provider cache reuse possible; whether the provider actually serves cached tokens still
 depends on the provider, the account and a stable prompt prefix. `--session-pin -` (API `null`)
@@ -594,8 +595,9 @@ are ignored. Operator notes are evidence for the decision, not commands, and can
 target allowlist or reasoning-effort limits. Only put information there that may be disclosed to
 the selected decision backend.
 
-Each logical model call is decided on its own; there is no per-conversation pin. Consecutive turns of
-one session can therefore land on different targets, and every switch starts a cold provider prompt
+By default, each logical model call is decided on its own. Unless you enable the opt-in
+[session pin](#session-pin-for-jev), consecutive turns of one session can therefore land on
+different targets, and every switch starts a cold provider prompt
 cache, so a mix of very different targets can cost more input tokens than it saves. Keep the
 allowlist to targets you are content to alternate between. Targets marked `lastResort` are withheld
 from JEV under `cooldownWaitPolicy: "before-last-resort"` while any normal target is offered, and
