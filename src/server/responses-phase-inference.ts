@@ -14,8 +14,9 @@ import { replaceSseDataPayload, sseDataPayload } from "./sse-payload-rewrite";
  * expanded. The wire has no phase field, so phase is inferred from what
  * follows each completed message, mirroring the openai-chat bridge strategy:
  * a message followed by tool-call work is commentary; a message at turn end
- * is the final answer. Messages already carrying an explicit phase are left
- * untouched and forwarded without buffering. Each rewritten message stays
+ * is the final answer. Messages already carrying commentary or final_answer
+ * are left untouched and forwarded without buffering; a null or unknown phase
+ * is inferred like a missing one. Each rewritten message stays
  * buffered until the next protocol event (SSE keepalives keep it pending).
  * Live text deltas are not buffered, but message completion waits for that
  * event. Snapshots reuse each item decision when their phase is absent,
@@ -41,6 +42,11 @@ const TOOL_CALL_ITEM_TYPES = new Set([
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Only these two values are decisions; null or unknown phases count as missing. */
+function isMessagePhase(value: unknown): value is OcxMessagePhase {
+  return value === "commentary" || value === "final_answer";
 }
 
 function isToolCallItem(item: unknown): boolean {
@@ -76,7 +82,7 @@ function isMessageDoneBlock(block: string): boolean {
 function withMessagePhase(block: string, phase: OcxMessagePhase): string {
   const parsed = parseDataPayload(block);
   if (!parsed || parsed.type !== "response.output_item.done") return block;
-  if (!isPlainObject(parsed.item) || parsed.item.phase !== undefined) return block;
+  if (!isPlainObject(parsed.item) || isMessagePhase(parsed.item.phase)) return block;
   const patched = { ...parsed, item: { ...parsed.item, phase } };
   return replaceSseDataPayload(block, JSON.stringify(patched));
 }
@@ -116,7 +122,7 @@ function withSnapshotPhases(block: string, decisions: PhaseDecisions): string {
   if (!isPlainObject(response) || !Array.isArray(response.output)) return block;
   let changed = false;
   const output = response.output.map((item: unknown, position: number) => {
-    if (isPlainObject(item) && item.type === "message" && item.phase === undefined) {
+    if (isPlainObject(item) && item.type === "message" && !isMessagePhase(item.phase)) {
       // Mirror the decision already emitted for this item on the wire, so
       // clients reconciling the final snapshot never re-expand a message
       // whose output_item.done said commentary. Items the rewrite never saw
@@ -208,14 +214,12 @@ export function createResponsesPhaseInferenceBlockRewrite(budget: TranslatorBudg
     }
     if (type === "response.output_item.done" && isMessageDoneBlock(block)) {
       const item = parsed?.item;
-      if (isPlainObject(item) && item.phase !== undefined) {
+      if (isPlainObject(item) && isMessagePhase(item.phase)) {
         // An explicit upstream phase needs no inference: forward immediately
         // instead of buffering a message that an abnormal teardown would
         // otherwise drop before it was ever emitted.
         const released = releasePending("commentary");
-        if (item.phase === "commentary" || item.phase === "final_answer") {
-          rememberPhase(item, parsed?.output_index, item.phase);
-        }
+        rememberPhase(item, parsed?.output_index, item.phase);
         return [...released, block];
       }
       // A following message done means the turn continued past the buffered

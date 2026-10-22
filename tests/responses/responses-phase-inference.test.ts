@@ -250,6 +250,29 @@ describe("Responses phase inference block rewrite", () => {
     rewrite.dispose?.();
   });
 
+  // Codex P2 on #7554: a null or unknown upstream phase is not an explicit
+  // decision, so it is inferred and the snapshot agrees with the event.
+  test.each([null, "analysis"])("a %p upstream phase is inferred like a missing one", phase => {
+    const rewrite = createResponsesPhaseInferenceBlockRewrite(createTestTranslatorBudget());
+    const done = (index: number, text: string) => sse("response.output_item.done", {
+      output_index: index,
+      item: { type: "message", id: "msg_" + index, role: "assistant", phase, content: [{ type: "output_text", text }] },
+    });
+    const narration = done(0, "checking");
+    expect(rewrite(narration)).toEqual([]);
+    const out = [
+      ...rewrite(functionCallAdded(1)),
+      ...rewrite(done(2, "answer")),
+      ...rewrite(completed([
+        { type: "message", id: "msg_0", role: "assistant", phase },
+        { type: "function_call", id: "fc_1", call_id: "call_1", name: "shell", arguments: "{}" },
+        { type: "message", id: "msg_2", role: "assistant", phase },
+      ])),
+    ];
+    expect(out.map(phaseOf)).toEqual(["commentary", undefined, "final_answer", "commentary,,final_answer"]);
+    rewrite.dispose?.();
+  });
+
   test("non-message blocks pass through unchanged", () => {
     const rewrite = createResponsesPhaseInferenceBlockRewrite(createTestTranslatorBudget());
     const block = functionCallAdded(0);
