@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { loadConfig, saveConfig } from "../../src/config";
 import { projectAlibabaRegionMigration } from "../../src/providers/alibaba-region-migration";
 import { routeModel } from "../../src/router";
+import { enrichProviderFromRegistry } from "../../src/providers/derive";
+import { registryEntryForProviderDestination } from "../../src/providers/registry";
+import type { OcxProviderConfig } from "../../src/types";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -47,7 +50,7 @@ test("moves a Beijing entry holding an international endpoint", () => {
   // so a Team-Edition-only model is present and routes.
   expect(moved.models).toContain("kimi-k2.7-code");
   expect(routeModel(projection.config, "alibaba-token-plan-intl/kimi-k2.7-code").provider.baseUrl)
-    .toContain("ap-southeast-1");
+    .toBe(INTL_URL);
 });
 
 test("the migrated config survives a reload", () => {
@@ -176,4 +179,30 @@ test("carries liveModels, modelCosts, and a user-authored note, but not the Beij
   expect(moved.modelCosts).toEqual(costs);
   expect(moved.note).toBe("my own note");
   expect(moved.models).toContain("kimi-k2.7-code");
+});
+
+
+test("canonical international host is recognized while preserving the saved destination", () => {
+  const config = migratableConfig();
+  const canonical = "https://token-plan.maas.qwencloudapi.com/compatible-mode/v1";
+  config.providers["alibaba-token-plan"]!.baseUrl = canonical;
+  const projection = projectAlibabaRegionMigration(config);
+  expect(projection.changed).toBe(true);
+  expect(projection.config.providers["alibaba-token-plan-intl"]?.baseUrl).toBe(canonical);
+  expect(config.providers["alibaba-token-plan"]?.baseUrl).toBe(canonical);
+});
+
+
+test("legacy Token Plan destinations retain reasoning metadata under custom names", () => {
+  for (const [id, baseUrl] of [
+    ["alibaba-token-plan", "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"],
+  ]) {
+    const provider: OcxProviderConfig = { adapter: "openai-chat", baseUrl };
+    expect(registryEntryForProviderDestination(provider)?.id).toBe(id);
+    enrichProviderFromRegistry("custom-plan", provider);
+    expect(provider.modelReasoningEfforts?.["deepseek-v4.1-flash-1017"]).toEqual(["low", "high", "max"]);
+    expect(provider.baseUrl).toBe(baseUrl);
+    expect(registryEntryForProviderDestination({ ...provider, adapter: "anthropic" })).toBeUndefined();
+    expect(registryEntryForProviderDestination({ ...provider, baseUrl: baseUrl.replace(".com/", ".com.example.test/") })).toBeUndefined();
+  }
 });
