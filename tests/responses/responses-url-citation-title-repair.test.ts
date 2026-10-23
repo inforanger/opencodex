@@ -46,6 +46,17 @@ describe("url_citation annotation repair on outbound history", () => {
     expect((out as { input: unknown[] }).input[0]).toBe(body.input[0]);
   });
 
+  test("negative and unsafe indexes are replaced with 0", () => {
+    const body = { input: [assistantWith([
+      { type: "url_citation", url: "https://a.example", title: "t", start_index: -1, end_index: 4 },
+      { type: "url_citation", url: "https://b.example", title: "t", start_index: "9".repeat(400), end_index: 2 ** 60 },
+    ])] };
+    expect(annotationsOf(repairUrlCitationAnnotations(body), 0)).toEqual([
+      { type: "url_citation", url: "https://a.example", title: "t", start_index: 0, end_index: 4 },
+      { type: "url_citation", url: "https://b.example", title: "t", start_index: 0, end_index: 0 },
+    ]);
+  });
+
   test("a valid body is returned by reference and non-array input is untouched", () => {
     const valid = { input: [assistantWith([{ type: "url_citation", url: "https://ok.example", title: "t", start_index: 0, end_index: 1 }])] };
     expect(repairUrlCitationAnnotations(valid)).toBe(valid);

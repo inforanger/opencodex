@@ -27,9 +27,17 @@ export function stripProviderInputItemMetadata(body: unknown): unknown {
   return repairUrlCitationAnnotations(input ? { ...body, input } : body);
 }
 
+function isUrlCitationIndex(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Coerce a replayed citation index to a non-negative safe integer, falling back to 0. */
 function repairUrlCitationIndex(value: unknown): number {
-  if (typeof value === "number" && Number.isInteger(value) && value >= 0) return value;
-  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
+  if (isUrlCitationIndex(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    const index = Number(value);
+    if (isUrlCitationIndex(index)) return index;
+  }
   return 0;
 }
 
@@ -58,8 +66,8 @@ export function repairUrlCitationAnnotations(body: unknown): unknown {
         const ann = part.annotations[annIndex];
         if (!isPlainObject(ann) || ann.type !== "url_citation") continue;
         const titleOk = typeof ann.title === "string";
-        const startOk = typeof ann.start_index === "number" && Number.isInteger(ann.start_index);
-        const endOk = typeof ann.end_index === "number" && Number.isInteger(ann.end_index);
+        const startOk = isUrlCitationIndex(ann.start_index);
+        const endOk = isUrlCitationIndex(ann.end_index);
         if (titleOk && startOk && endOk) continue;
         const next: Record<string, unknown> = { ...ann };
         if (!titleOk) next.title = typeof ann.url === "string" ? ann.url : "";
